@@ -15,9 +15,14 @@
 #include "bolt/Passes/DataflowInfoManager.h"
 #include "bolt/Utils/CommandLineOpts.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/CommandLine.h"
 #include <algorithm>
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
 #include <vector>
+#include <stack>
 
 #undef  DEBUG_TYPE
 #define DEBUG_TYPE "mcf"
@@ -40,6 +45,11 @@ static cl::opt<bool> UseRArcs(
     "mcf-use-rarcs",
     cl::desc("in MCF, consider the possibility of cancelling flow to balance "
              "edges"),
+    cl::Hidden, cl::cat(BoltOptCategory));
+
+static cl::opt<bool> UseProfi(
+    "mcf-use-profi",
+    cl::desc("in MCF, use profi algorithm"),
     cl::Hidden, cl::cat(BoltOptCategory));
 
 } // namespace opts
@@ -363,6 +373,400 @@ createLoopNestLevelMap(BinaryFunction &BF) {
   return LoopNestLevel;
 }
 
+
+
+/// The minimum-cost maximum flow algorithm.
+///
+/// The algorithm finds the maximum flow of minimum cost on a given (directed)
+/// network using a modified version of the classical Moore-Bellman-Ford
+/// approach. The algorithm applies a number of augmentation iterations in which
+/// flow is sent along paths of positive capacity from the source to the sink.
+/// The worst-case time complexity of the implementation is O(v(f)*m*n), where
+/// where m is the number of edges, n is the number of vertices, and v(f) is the
+/// value of the maximum flow. However, the observed running time on typical
+/// instances is sub-quadratic, that is, o(n^2).
+///
+/// The input is a set of edges with specified costs and capacities, and a pair
+/// of nodes (source and sink). The output is the flow along each edge of the
+/// minimum total cost respecting the given edge capacities.
+static constexpr int64_t INF = ((int64_t)1) << 50;
+class MinCostMaxFlow{
+public:
+  MinCostMaxFlow(const ProfiParams &Params) : Params(Params) {}
+  void initialize(uint64_t NodeCount,uint64_t SourceNode, uint64_t SinkNode) {
+    Source = SourceNode;
+    Target = SinkNode;
+    Nodes = std::vector<Node>(NodeCount);
+    Edges = std::vector<std::vector<Edge>>(NodeCount,std::vector<Edge>());
+    if(Params.EvenFlowDistribution)
+      AugmentingEdges = std::vector<std::vector<Edge *>>(NodeCount, std::vector<Edge *>());
+  }
+  int64_t run(){
+    LLVM_DEBUG(dbgs() << "Starting profi for " << Nodes.size() << " nodes\n");
+    //TODO:applyFlowAugmentation
+    size_t AugmentationIters = applyFlowAugmentation();
+    int64_t TotalCost = 0;
+    int64_t TotalFlow = 0;
+    for(uint64_t Src = 0; Src < Nodes.size() ; Src ++){
+      for(auto &Edge:Edges[Src]){
+        TotalCost += Edge.Cost * Edge.Flow;
+        if(Src == Source)
+          TotalFlow += Edge.Flow;
+      }
+    }
+    // LLVM_DEBUG(dbgs() << "Completed profi after " << AugmentationIters
+    //               << " iterations with " << TotalFlow << " total flow"
+    //               << " of " << TotalCost << " cost\n");
+    (void)TotalFlow;
+    (void)AugmentationIters;
+    return TotalCost;
+  }
+
+  void addEdge(uint64_t Src,uint64_t To,int64_t Capacity, int64_t Cost){
+    assert(Capacity > 0 && "adding an edge of zero capacity");
+    assert(Src != To && "loop edge are not supported");
+    Edge SrcEdge;
+    SrcEdge.To = To;
+    SrcEdge.Cost = Cost;
+    SrcEdge.Capacity = Capacity;
+    SrcEdge.Flow = 0;
+    SrcEdge.RevEdgeIndex = Edges[To].size();
+
+    Edge ToEdge;
+    ToEdge.To = Src;
+    ToEdge.Cost = -Cost;
+    ToEdge.Capacity = 0;//这个cap是否是残差网络的时候会更新
+    ToEdge.Flow = 0;
+    ToEdge.RevEdgeIndex = Edges[Src].size();
+    
+    Edges[Src].push_back(SrcEdge);
+    Edges[To].push_back(ToEdge);
+  }
+  void addEdge(uint64_t Src,uint64_t To,int64_t Cost){
+    addEdge(Src,To,INF,Cost);
+  }
+private:
+  //返回找增广路的迭代次数
+  size_t applyFlowAugmentation(){
+    size_t AugmentationIters = 0;
+    while(findAugmentingPath()){
+      uint64_t PathCapacity = computeAugmentingPathCapacity();
+      while(PathCapacity > 0){
+        bool Progress = false;
+        if(Params.EvenFlowDistribution){
+          //找到哪些边能够成为增广路
+          identifyShortestEdges(PathCapacity);
+
+          //找到一个能够产生增广路的DAG
+          auto AugmentingOrder = findAugmentingDAG();
+
+          //把增广路用上
+          Progress = augmentFlowAlongDAG(AugmentingOrder);
+          PathCapacity = computeAugmentingPathCapacity();
+        }
+
+        if(!Progress){
+          augmentFlowAlongPath(PathCapacity);
+          PathCapacity = 0;
+
+        }
+        AugmentationIters++;
+      }
+    }
+    return AugmentationIters;
+  }
+  //找增广路径
+  bool findAugmentingPath(){
+    for(auto &Node:Nodes){
+      Node.Distance = INF;
+      Node.PreNode = uint64_t(-1);
+      Node.PreEdgeIndex = uint64_t(-1);
+      Node.Taken = false;
+    }
+
+    std::queue<uint64_t> Queue;
+    Queue.push(Source);
+    Nodes[Source].Distance = 0;
+    Nodes[Source].Taken = true;
+    while(!Queue.empty()){
+      uint64_t Src = Queue.front();
+      Queue.pop();
+      Nodes[Src].Taken = false;
+      if(!Params.EvenFlowDistribution && Nodes[Target].Distance == 0)
+        break;
+      if(Nodes[Src].Distance > Nodes[Target].Distance)
+        continue;
+      for(uint64_t EdgeIdx = 0;EdgeIdx < Edges[Src].size();EdgeIdx ++){
+        auto &Edge = Edges[Src][EdgeIdx];
+        if(Edge.Flow < Edge.Capacity){
+          uint64_t To = Edge.To;
+          int64_t NewDistance = Nodes[Src].Distance + Edge.Cost;
+          if(Nodes[To].Distance > NewDistance){
+            Nodes[To].Distance = NewDistance;
+            Nodes[To].PreNode = Src;
+            Nodes[To].PreEdgeIndex = EdgeIdx;
+            if(!Nodes[To].Taken){
+              Queue.push(To);
+              Nodes[To].Taken = true;
+            }
+          }
+        }
+      }
+    }
+    return Nodes[Target].Distance != INF;
+  }
+
+  //计算增广路的cap
+  //有一个问题，这样子往回找到的路径是不均衡的，在两条都可以的情况下，是如何选择的
+  uint64_t computeAugmentingPathCapacity(){
+    uint64_t PathCapacity = INF;
+    uint64_t Now = Target;
+    while(Now != Source){
+      uint64_t Pre = Nodes[Now].PreNode;
+      auto &Edge = Edges[Pre][Nodes[Now].PreEdgeIndex];
+      assert(Edge.Capacity >= Edge.Flow && "incorrect edge flow");
+      uint64_t EdgeCapacity = uint64_t(Edge.Capacity - Edge.Flow);
+      PathCapacity = std::min(PathCapacity,EdgeCapacity);
+      Now = Pre;
+    }
+    return PathCapacity;
+  }
+  ///找到增广路的最短路径的候选点
+  void identifyShortestEdges(uint64_t PathCapacity) {
+    assert(PathCapacity > 0 && "found an incorrect augmenting DAG");
+    uint64_t MinCapacity = std::max(PathCapacity/2,uint64_t(1));
+    for(size_t Src = 0; Src < Nodes.size(); Src ++){
+      if(Nodes[Src].Distance > Nodes[Target].Distance)
+        continue;
+      for(auto &Edge:Edges[Src]){
+        uint64_t To = Edge.To;
+        Edge.OnShortestPath = Src != Target && To != Source
+          && Nodes[To].Distance <= Nodes[Target].Distance
+          && Nodes[To].Distance == Nodes[Src].Distance + Edge.Cost ///为什么这里是cost?
+          && Edge.Capacity > Edge.Flow
+          && uint64_t(Edge.Capacity - Edge.Flow) >= MinCapacity; ///这个阈值有什么用吗?
+      }
+    }
+  }
+  //找到一个增广路的DAG排序
+  std::vector<uint64_t> findAugmentingDAG() {
+    typedef std::pair<uint64_t, uint64_t> StackItemType;
+    std::stack<StackItemType> Stack;
+    std::vector<uint64_t> AugmentingOrder;
+
+    for(auto &Node:Nodes){
+      Node.Discovery = 0;
+      Node.Finish = 0;
+      Node.NumCalls = 0;
+      Node.Taken = false;
+    }
+    uint64_t Time = 0;
+    Nodes[Target].Taken = true;
+
+    Stack.emplace(Source,0);
+    Nodes[Source].Discovery = ++Time;
+    /// dfs搜索到一条最短路
+    while(!Stack.empty()){
+      auto NodeIdx = Stack.top().first;
+      auto EdgeIdx = Stack.top().second;
+      
+      if(EdgeIdx < Edges[NodeIdx].size()){
+        auto &Edge = Edges[NodeIdx][EdgeIdx];
+        auto &To = Nodes[Edge.To];
+        Stack.top().second ++;
+        if(Edge.OnShortestPath){
+          if(To.Discovery == 0 && To.NumCalls < MaxDfsCalls){
+            To.Discovery = ++Time;
+            Stack.emplace(Edge.To,0);
+            To.NumCalls ++;
+          }else if(To.Taken && To.Finish!= 0){
+            Nodes[NodeIdx].Taken = true;
+          }
+        }
+      }else{
+        Stack.pop();
+        ///这里是不是有改进的空间?
+        if(!Nodes[NodeIdx].Taken)
+          Nodes[NodeIdx].Discovery = 0;
+        else{
+          Nodes[NodeIdx].Finish = ++ Time;
+          if(NodeIdx != Source){
+            assert(!Stack.empty() && "empty stack while running bfs");
+            Nodes[Stack.top().first].Taken = true;
+          }
+          AugmentingOrder.push_back(NodeIdx);
+        }
+      }
+    }
+
+    std::reverse(AugmentingOrder.begin(),AugmentingOrder.end());
+    for(size_t Src:AugmentingOrder){
+      AugmentingEdges[Src].clear();
+      for(auto &Edge:Edges[Src]){
+        uint64_t To = Edge.To;
+        if(Edge.OnShortestPath && Nodes[Src].Taken && Nodes[To].Taken && Nodes[To].Finish < Nodes[Src].Finish){
+          AugmentingEdges[Src].push_back(&Edge);
+        }
+      }
+      assert((Src == Target || !AugmentingEdges[Src].empty()) && "incorrectly constructed augmenting edges");
+    }
+    return AugmentingOrder;
+  }
+  //把这条增广路用上
+  //这个函数写的有点迷惑，有改进空间 ?
+  bool augmentFlowAlongDAG(const std::vector<uint64_t> &AugmentingOrder){
+    for(uint64_t Src:AugmentingOrder){
+      Nodes[Src].FracFlow = 0;
+      Nodes[Src].IntFlow = 0;
+      for(auto &Edge : AugmentingEdges[Src]){
+        Edge -> AugmentedFlow = 0;
+      }
+    }
+    //表示当前被分流成多少个点
+    //猜想是这样：ugmentingOrder里面放的是点，而AugmentingEdges[Src]里面放的是每个关键边
+    //MaxFlowAmount的意思没有很明白?   先当成1.0的往下传，然后看每个大概占多少，以及传到最后大概剩多少，同时不断计算，从最初流过来的流量大概是多少
+    uint64_t MaxFlowAmount = INF;
+    Nodes[Source].FracFlow = 1.0;
+    for(uint64_t Src : AugmentingOrder){
+      assert((Src == Target || Nodes[Src].FracFlow > 0.0) &&"incorrectly computed fractional flow");
+      uint64_t Degree = AugmentingEdges[Src].size();
+      for(auto &Edge:AugmentingEdges[Src]){
+        //把所有的流量平分给每个点
+        double EdgeFlow = Nodes[Src].FracFlow / Degree;
+        Nodes[Edge->To].FracFlow += EdgeFlow;
+        if(Edge -> Capacity ==INF)
+          continue;
+        uint64_t MaxIntFlow = double(Edge->Capacity - Edge->Flow) / EdgeFlow;
+        MaxFlowAmount = std::min(MaxFlowAmount,MaxIntFlow);
+      }
+    }
+
+    if(MaxFlowAmount == 0)
+      return false;
+
+    Nodes[Source].IntFlow = MaxFlowAmount;
+    for(uint64_t Src : AugmentingOrder){
+      if(Src == Target)
+        break;
+      uint64_t Degree = AugmentingEdges[Src].size();
+      uint64_t SuccFlow = (Nodes[Src].IntFlow + Degree - 1)/Degree;
+      for(auto &Edge:AugmentingEdges[Src]){
+        uint64_t To = Edge -> To;
+        uint64_t EdgeFlow = std::min(Nodes[Src].IntFlow,SuccFlow);
+        EdgeFlow = std::min(EdgeFlow,uint64_t(Edge->Capacity - Edge->Flow));
+        Nodes[To].IntFlow += EdgeFlow;
+        Nodes[Src].IntFlow -= EdgeFlow;
+        Edge->AugmentedFlow += EdgeFlow;
+      }
+    }
+    assert(Nodes[Target].IntFlow <= MaxFlowAmount);
+    Nodes[Target].IntFlow = 0;
+    for(size_t Idx = AugmentingOrder.size()-1 ; Idx > 0; Idx --){
+      uint64_t Src = AugmentingOrder[Idx - 1];
+      for(auto &Edge:AugmentingEdges[Src]){
+        uint64_t To = Edge -> To;
+        if(Nodes[To].IntFlow == 0)
+          continue;
+        uint64_t EdgeFlow = std::min(Nodes[To].IntFlow,Edge -> AugmentedFlow);
+        Nodes[To].IntFlow -= EdgeFlow;
+        Nodes[Src].IntFlow += EdgeFlow;
+        Edge -> AugmentedFlow -= EdgeFlow;
+      }
+    }
+
+    bool HasSaturatedEdges = false;
+    for(uint64_t Src:AugmentingOrder){
+      assert(Src == Source || Nodes[Src].IntFlow == 0);
+      for(auto &Edge:AugmentingEdges[Src]){
+        assert(uint64_t(Edge->Capacity - Edge->Flow) >= Edge->AugmentedFlow);
+        auto &RevEdge = Edges[Edge->To][Edge->RevEdgeIndex];
+        Edge->Flow += Edge->AugmentedFlow;
+        RevEdge.Flow -= Edge->AugmentedFlow;
+        if(Edge -> Capacity == Edge->Flow && Edge->AugmentedFlow > 0)
+          HasSaturatedEdges = true;
+      }
+    }
+
+    return HasSaturatedEdges;
+  }
+
+  void augmentFlowAlongPath(uint64_t PathCapacity){
+    assert(PathCapacity > 0 && "found an incorrect augmenting path");
+    uint64_t Now = Target;
+    while(Now != Source){
+      uint64_t Pre = Nodes[Now].PreNode;
+      auto &Edge = Edges[Pre][Nodes[Now].PreEdgeIndex];
+      auto &RevEdge = Edges[Now][Edge.RevEdgeIndex];
+      Edge.Flow += PathCapacity;
+      RevEdge.Flow -= PathCapacity;
+      Now = Pre;                             
+    }
+  }
+   
+
+
+//dfs的时候最多搜索10次
+static constexpr uint64_t MaxDfsCalls = 10;
+struct Node{
+    /// The cost of the cheapest path from the source to the current node.
+    //从source到Node的最近距离
+    int64_t Distance;
+    /// The node preceding the current one in the path.
+    //前一个节点
+    uint64_t PreNode;
+    /// The index of the edge between ParentNode and the current node.
+    //前一个节点到当前节点边的index
+    uint64_t PreEdgeIndex;
+    //相当于vis
+    bool Taken;
+    //结束事件，什么意思还没搞懂？
+    uint64_t Finsh;
+
+    ///下面这是什么意思，为什么要分整数和分数?
+    /// Data fields utilized in DAG-augmentation:
+    /// Fractional flow.
+    double FracFlow;
+    /// Integral flow.
+    uint64_t IntFlow;
+
+    ///表示第一次被使用的时间
+    uint64_t Discovery;
+    /// 表示第一次放到stack中的时间
+    uint64_t Finish;
+    /// 表示被搜索到的次数
+    uint64_t NumCalls;
+
+};
+
+struct Edge{
+  int64_t Cost;
+  int64_t Capacity;
+  int64_t Flow;
+  uint64_t To;
+  //反向边在To的边里面的index
+  uint64_t RevEdgeIndex;
+  //表示这条边是否在最短路上，是否能够被选择
+  bool OnShortestPath;
+
+  //这是什么意思?
+  uint64_t AugmentedFlow;
+};
+
+std::vector<Node> Nodes;
+std::vector<std::vector<Edge>> Edges;
+uint64_t Source;
+uint64_t Target;
+//从某个点出发的增广路
+std::vector<std::vector<Edge *>> AugmentingEdges;
+const ProfiParams &Params;
+
+};
+
+
+
+
+
+
 } // end anonymous namespace
 
 void equalizeBBCounts(DataflowInfoManager &Info, BinaryFunction &BF) {
@@ -441,7 +845,28 @@ void equalizeBBCounts(DataflowInfoManager &Info, BinaryFunction &BF) {
   }
 }
 
+
+void InitializationMCF(BinaryFunction &BF)
+{
+  llvm_unreachable("not implemented");
+
+}
+
+void solveMCF(BinaryFunction &BF, MCFCostFunction CostFunction) {
+  llvm_unreachable("not implemented");
+
+
+}
+
+
 void estimateEdgeCounts(BinaryFunction &BF) {
+  if(opts::UseProfi){
+    /*1. Initialization MCF*/
+    InitializationMCF(BF);
+    solveMCF(BF,MCF_PROFI);
+    return ;
+  }
+
   EdgeWeightMap PredEdgeWeights;
   EdgeWeightMap SuccEdgeWeights;
   if (!opts::IterativeGuess) {
@@ -462,9 +887,6 @@ void estimateEdgeCounts(BinaryFunction &BF) {
   recalculateBBCounts(BF, /*AllEdges=*/false);
 }
 
-void solveMCF(BinaryFunction &BF, MCFCostFunction CostFunction) {
-  llvm_unreachable("not implemented");
-}
 
 } // namespace bolt
 } // namespace llvm

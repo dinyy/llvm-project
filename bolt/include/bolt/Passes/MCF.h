@@ -19,8 +19,61 @@ enum MCFCostFunction : char {
   MCF_DISABLE = 0,
   MCF_LINEAR,
   MCF_QUADRATIC,
-  MCF_LOG,
-  MCF_BLAMEFTS
+  MCF_LOG, 
+  MCF_BLAMEFTS,
+  MCF_PROFI
+};
+
+
+/// Various thresholds and options controlling the behavior of the profile
+/// inference algorithm. Default values are tuned for several large-scale
+/// applications, and can be modified via corresponding command-line flags.
+struct ProfiParams {
+  /// Evenly distribute flow when there are multiple equally likely options.
+  bool EvenFlowDistribution{false};
+
+  /// Evenly re-distribute flow among unknown subgraphs.
+  bool RebalanceUnknown{false};
+
+  /// Join isolated components having positive flow.
+  bool JoinIslands{false};
+
+  /// The cost of increasing a block's count by one.
+  unsigned CostBlockInc{0};
+
+  /// The cost of decreasing a block's count by one.
+  unsigned CostBlockDec{0};
+
+  /// The cost of increasing a count of zero-weight block by one.
+  unsigned CostBlockZeroInc{0};
+
+  /// The cost of increasing the entry block's count by one.
+  unsigned CostBlockEntryInc{0};
+
+  /// The cost of decreasing the entry block's count by one.
+  unsigned CostBlockEntryDec{0};
+
+  /// The cost of increasing an unknown block's count by one.
+  unsigned CostBlockUnknownInc{0};
+
+  /// The cost of increasing a jump's count by one.
+  unsigned CostJumpInc{0};
+
+  /// The cost of increasing a fall-through jump's count by one.
+  unsigned CostJumpFTInc{0};
+
+  /// The cost of decreasing a jump's count by one.
+  unsigned CostJumpDec{0};
+
+  /// The cost of decreasing a fall-through jump's count by one.
+  unsigned CostJumpFTDec{0};
+
+  /// The cost of increasing an unknown jump's count by one.
+  unsigned CostJumpUnknownInc{0};
+
+  /// The cost of increasing an unknown fall-through jump's count by one.
+  unsigned CostJumpUnknownFTInc{0};
+
 };
 
 /// Implement the idea in "SamplePGO - The Power of Profile Guided Optimizations
