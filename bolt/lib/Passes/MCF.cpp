@@ -9,6 +9,9 @@
 // This file implements functions for solving minimum-cost flow problem.
 //
 //===----------------------------------------------------------------------===//
+/*
+  1. 什么是unlikely的jump，似乎没有说明，也没看到哪个jump是unlikely的？
+*/
 
 #include "bolt/Passes/MCF.h"
 #include "bolt/Core/BinaryFunction.h"
@@ -17,10 +20,13 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/ADT/BitVector.h"
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <queue>
+#include <utility>
 #include <vector>
 #include <stack>
 
@@ -52,12 +58,147 @@ static cl::opt<bool> UseProfi(
     cl::desc("in MCF, use profi algorithm"),
     cl::Hidden, cl::cat(BoltOptCategory));
 
+//profi中带的参数，直接拿过来的
+static cl::opt<bool> SampleProfileEvenFlowDistribution(
+    "sample-profile-even-flow-distribution", cl::init(true), cl::Hidden,
+    cl::desc("Try to evenly distribute flow when there are multiple equally "
+             "likely options."));
+
+static cl::opt<bool> SampleProfileRebalanceUnknown(
+    "sample-profile-rebalance-unknown", cl::init(true), cl::Hidden,
+    cl::desc("Evenly re-distribute flow among unknown subgraphs."));
+
+static cl::opt<bool> SampleProfileJoinIslands(
+    "sample-profile-join-islands", cl::init(true), cl::Hidden,
+    cl::desc("Join isolated components having positive flow."));
+
+static cl::opt<unsigned> SampleProfileProfiCostBlockInc(
+    "sample-profile-profi-cost-block-inc", cl::init(10), cl::Hidden,
+    cl::desc("The cost of increasing a block's count by one."));
+
+static cl::opt<unsigned> SampleProfileProfiCostBlockDec(
+    "sample-profile-profi-cost-block-dec", cl::init(20), cl::Hidden,
+    cl::desc("The cost of decreasing a block's count by one."));
+
+static cl::opt<unsigned> SampleProfileProfiCostBlockEntryInc(
+    "sample-profile-profi-cost-block-entry-inc", cl::init(40), cl::Hidden,
+    cl::desc("The cost of increasing the entry block's count by one."));
+
+static cl::opt<unsigned> SampleProfileProfiCostBlockEntryDec(
+    "sample-profile-profi-cost-block-entry-dec", cl::init(10), cl::Hidden,
+    cl::desc("The cost of decreasing the entry block's count by one."));
+
+static cl::opt<unsigned> SampleProfileProfiCostBlockZeroInc(
+    "sample-profile-profi-cost-block-zero-inc", cl::init(11), cl::Hidden,
+    cl::desc("The cost of increasing a count of zero-weight block by one."));
+
+static cl::opt<unsigned> SampleProfileProfiCostBlockUnknownInc(
+    "sample-profile-profi-cost-block-unknown-inc", cl::init(0), cl::Hidden,
+    cl::desc("The cost of increasing an unknown block's count by one."));
+
 } // namespace opts
 
 namespace llvm {
 namespace bolt {
 
 namespace {
+
+
+/// A wrapper of a jump between two basic blocks.
+struct FlowJump {
+  uint64_t Source;
+  uint64_t Target;
+  uint64_t Weight{0};
+  bool HasUnknownWeight{true};
+  //这是什么意思?
+  bool IsUnlikely{false};
+  uint64_t Flow{0};
+};
+
+/*用到的结构体 */
+/// A wrapper of a binary basic block.
+struct FlowBlock {
+  uint64_t Index;
+  uint64_t Weight{0};
+  bool HasUnknownWeight{true};
+  bool IsUnlikely{false};
+  uint64_t Flow{0};
+  std::vector<FlowJump *> SuccJumps;
+  std::vector<FlowJump *> PredJumps;
+
+  /// Check if it is the entry block in the function.
+  bool isEntry() const { return PredJumps.empty(); }
+
+  /// Check if it is an exit block in the function.
+  bool isExit() const { return SuccJumps.empty(); }
+};
+
+
+/// A wrapper of binary function with basic blocks and jumps.
+struct FlowFunction {
+  /// Basic blocks in the function.
+  std::vector<FlowBlock> Blocks;
+  /// Jumps between the basic blocks.
+  std::vector<FlowJump> Jumps;
+  /// The index of the entry block.
+  uint64_t Entry{0};
+};
+/// Various thresholds and options controlling the behavior of the profile
+/// inference algorithm. Default values are tuned for several large-scale
+/// applications, and can be modified via corresponding command-line flags.
+struct ProfiParams {
+  /// Evenly distribute flow when there are multiple equally likely options.
+  bool EvenFlowDistribution{false};
+
+  /// Evenly re-distribute flow among unknown subgraphs.
+  bool RebalanceUnknown{false};
+
+  /// Join isolated components having positive flow.
+  bool JoinIslands{false};
+
+  /// The cost of increasing a block's count by one.
+  unsigned CostBlockInc{0};
+
+  /// The cost of decreasing a block's count by one.
+  unsigned CostBlockDec{0};
+
+  /// The cost of increasing a count of zero-weight block by one.
+  unsigned CostBlockZeroInc{0};
+
+  /// The cost of increasing the entry block's count by one.
+  unsigned CostBlockEntryInc{0};
+
+  /// The cost of decreasing the entry block's count by one.
+  unsigned CostBlockEntryDec{0};
+
+  /// The cost of increasing an unknown block's count by one.
+  unsigned CostBlockUnknownInc{0};
+
+  /// The cost of increasing a jump's count by one.
+  unsigned CostJumpInc{0};
+
+  /// The cost of increasing a fall-through jump's count by one.
+  unsigned CostJumpFTInc{0};
+
+  /// The cost of decreasing a jump's count by one.
+  unsigned CostJumpDec{0};
+
+  /// The cost of decreasing a fall-through jump's count by one.
+  unsigned CostJumpFTDec{0};
+
+  /// The cost of increasing an unknown jump's count by one.
+  unsigned CostJumpUnknownInc{0};
+
+  /// The cost of increasing an unknown fall-through jump's count by one.
+  unsigned CostJumpUnknownFTInc{0};
+
+  /// The cost of taking an unlikely block/jump.
+  //设置一个unlikely的jump的代价
+  const int64_t CostUnlikely = ((int64_t)1) << 30;
+};
+
+
+
 
 // Edge Weight Inference Heuristic
 //
@@ -390,7 +531,7 @@ createLoopNestLevelMap(BinaryFunction &BF) {
 /// of nodes (source and sink). The output is the flow along each edge of the
 /// minimum total cost respecting the given edge capacities.
 static constexpr int64_t INF = ((int64_t)1) << 50;
-class MinCostMaxFlow{
+class MinCostMaxFlow{  
 public:
   MinCostMaxFlow(const ProfiParams &Params) : Params(Params) {}
   void initialize(uint64_t NodeCount,uint64_t SourceNode, uint64_t SinkNode) {
@@ -765,6 +906,417 @@ const ProfiParams &Params;
 
 
 
+/*
+  adjust Flow：
+  1. 把所有的island进行处理：找一条最短路，然后流量+1
+  2. 识别所有的unknown子图,把所有unknown的每条路的概率都变成50%
+*/
+class FlowAdjuster{
+public:
+  FlowAdjuster(const ProfiParams &Params,FlowFunction &Func):Params(Params),Func(Func){}
+  void run(){
+    if(Params.JoinIslands){
+      joinIsolatedComponents();
+    }
+    if(Params.RebalanceUnknown){
+      rebalanceUnknownSubgraphs();
+    }
+  }
+private:
+  void joinIsolatedComponents(){
+    //找到所有能从source流到的block
+    auto Visited = BitVector(NumBlocks(),false);
+    findReachable(Func.Entry,Visited);
+
+    for(uint64_t I = 0 ;I < NumBlocks();I++){
+      auto &Block=Func.Blocks[I];
+      if(Block.Flow > 0 && !Visited[I]){
+        auto Path = findShortestPath(I);
+        assert(Path.size() > 0 && Path[0]->Source == Func.Entry &&
+               "incorrectly computed path adjusting control flow");
+        Func.Blocks[Func.Entry].Flow += 1;
+        for (auto &Jump : Path) {
+          Jump->Flow += 1;
+          Func.Blocks[Jump->Target].Flow += 1;
+          // 这里的findReachable是不是没必要?为什么不加完以后直接findReachable?
+          findReachable(Jump->Target, Visited);
+        }
+      }
+    }
+  }
+  //bfs搜一遍所有有值的点
+  void findReachable(uint64_t Src,BitVector &Visited){
+    if(Visited[Src])
+      return ;
+    std::queue<uint64_t> Queue;
+    Queue.push(Src);
+    Visited[Src]=true;
+    while(!Queue.empty()){
+      Src = Queue.front();
+      Queue.pop();
+      for(auto *Jump:Func.Blocks[Src].SuccJumps){
+        uint64_t Dst = Jump -> Target;
+        if(Jump -> Flow > 0 && !Visited[Dst]){
+          Queue.push(Dst);
+          Visited[Dst] = true;
+        }
+      }
+    }
+  }
+
+  std::vector<FlowJump *> findShortestPath(uint64_t BlockIdx){
+    //源点到当前点的路径
+    auto ForwardPath =  findShortestPath(Func.Entry, BlockIdx);
+    //当前点到汇点的路径
+    auto BackwardPath = findShortestPath(BlockIdx, AnyExitBlock);
+
+    std::vector<FlowJump *> Result;
+    Result.insert(Result.end(), ForwardPath.begin(), ForwardPath.end());
+    Result.insert(Result.end(), BackwardPath.begin(), BackwardPath.end());
+    return Result;
+  }
+
+  //用dijk找最短路
+  std::vector<FlowJump *>findShortestPath(uint64_t Source,uint64_t Target){
+    if(Source == Target)
+      return std::vector<FlowJump *>();
+    if(Func.Blocks[Source].isExit() && Target == AnyExitBlock)
+      return std::vector<FlowJump *>();
+
+    auto Distance = std::vector<int64_t>(NumBlocks(), INF);
+    auto Parent = std::vector<FlowJump *>(NumBlocks(), nullptr);
+    Distance[Source] = 0;
+    std::set<std::pair<uint64_t,uint64_t>> Queue;
+    Queue.insert(std::make_pair(Distance[Source], Source));
+
+    //这里这种dijk写法是否有改进空间
+    while(!Queue.empty()){
+      uint64_t Src = Queue.begin() -> second;
+      if(Src == Target || (Func.Blocks[Src].isExit() && Target == AnyExitBlock))
+        break;
+      for(auto *Jump:Func.Blocks[Src].SuccJumps){
+        uint64_t Dst = Jump -> Target;
+        int64_t JumpDist = jumpDistance(Jump);
+        if(Distance[Dst] > Distance[Src] + JumpDist){
+          Queue.erase(std::make_pair(Distance[Dst], Dst));
+          Distance[Dst] = Distance[Src] + JumpDist;
+          Parent[Dst] = Jump;
+          Queue.insert(std::make_pair(Distance[Dst], Dst));
+        }
+      }
+    }
+    //如果没有给定Target，指定最近的exit block
+    if(Target == AnyExitBlock){
+      for(uint64_t I = 0; I < NumBlocks() ; I++){
+        if(Func.Blocks[I].isExit() && Parent[I] != nullptr){
+          if(Target == AnyExitBlock || Distance[Target] > Distance[I])
+            Target = I;
+        }
+      }
+    }
+    assert(Parent[Target] != nullptr && "a path does not exist");
+
+    // Extract the constructed path
+    std::vector<FlowJump *> Result;
+    uint64_t Now = Target;
+    while (Now != Source) {
+      assert(Now == Parent[Now]->Target && "incorrect parent jump");
+      Result.push_back(Parent[Now]);
+      Now = Parent[Now]->Source;
+    }
+    // Reverse the path, since it is extracted from Target to Source
+    std::reverse(Result.begin(), Result.end());
+    return Result;
+  }
+
+  /// A distance of a path for a given jump.
+  /// In order to incite the path to use blocks/jumps with large positive flow,
+  /// and avoid changing branch probability of outgoing edges drastically,
+  /// set the jump distance so as:
+  ///   - to minimize the number of unlikely jumps used and subject to that,
+  ///   - to minimize the number of Flow == 0 jumps used and subject to that,
+  ///   - minimizes total multiplicative Flow increase for the remaining edges.
+  /// To capture this objective with integer distances, we round off fractional
+  /// parts to a multiple of 1 / BaseDistance.
+  /// 这里似乎有改进空间?
+  int64_t jumpDistance(FlowJump *Jump) const{
+    if(Jump->IsUnlikely)
+      return Params.CostUnlikely;
+    uint64_t BaseDistance = std::max(FlowAdjuster::MinBaseDistance,
+                                     std::min(Func.Blocks[Func.Entry].Flow,Params.CostUnlikely/(2*(NumBlocks()+1))));
+    if(Jump->Flow > 0)
+      return BaseDistance + BaseDistance / Jump->Flow;
+    return 2 * BaseDistance * (NumBlocks() + 1);
+  } 
+
+  void rebalanceUnknownSubgraphs() {
+    //找到unknown的子图
+    for(const FlowBlock &SrcBlock:Func.Blocks){
+      if (!canRebalanceAtRoot(&SrcBlock))
+        continue;
+
+      //找到一个unknown的子图，然后沿着这条路直接填充 
+      std::vector<FlowBlock *> UnknownBlocks;
+      std::vector<FlowBlock *> KnownDstBlocks;
+      findUnknownSubgraph(&SrcBlock, KnownDstBlocks, UnknownBlocks);
+      FlowBlock *DstBlock = nullptr;
+      //确定重新rebalance这个子图是否可行
+      if (!canRebalanceSubgraph(&SrcBlock, KnownDstBlocks, UnknownBlocks,
+                                DstBlock))
+        continue;
+      //里面有cycle的子图也无法处理
+      // We cannot rebalance subgraphs containing cycles among unknown blocks
+      if (!isAcyclicSubgraph(&SrcBlock, DstBlock, UnknownBlocks))
+        continue;
+
+      rebalanceUnknownSubgraph(&SrcBlock, DstBlock, UnknownBlocks);
+    }
+  
+  }
+  ///没有仔细看过?
+    /// Rebalance a given subgraph rooted at SrcBlock, ending at DstBlock and
+  /// having UnknownBlocks intermediate blocks.
+  void rebalanceUnknownSubgraph(const FlowBlock *SrcBlock,
+                                const FlowBlock *DstBlock,
+                                const std::vector<FlowBlock *> &UnknownBlocks) {
+    assert(SrcBlock->Flow > 0 && "zero-flow block in unknown subgraph");
+
+    // Ditribute flow from the source block
+    uint64_t BlockFlow = 0;
+    // SrcBlock's flow is the sum of outgoing flows along non-ignored jumps
+    for (auto *Jump : SrcBlock->SuccJumps) {
+      if (ignoreJump(SrcBlock, DstBlock, Jump))
+        continue;
+      BlockFlow += Jump->Flow;
+    }
+    rebalanceBlock(SrcBlock, DstBlock, SrcBlock, BlockFlow);
+
+    // Ditribute flow from the remaining blocks
+    for (auto *Block : UnknownBlocks) {
+      assert(Block->HasUnknownWeight && "incorrect unknown subgraph");
+      uint64_t BlockFlow = 0;
+      // Block's flow is the sum of incoming flows
+      for (auto *Jump : Block->PredJumps) {
+        BlockFlow += Jump->Flow;
+      }
+      Block->Flow = BlockFlow;
+      rebalanceBlock(SrcBlock, DstBlock, Block, BlockFlow);
+    }
+  }
+  
+  
+  ///没有仔细看过?
+  /// Redistribute flow for a block in a subgraph rooted at SrcBlock,
+  /// and ending at DstBlock.
+  void rebalanceBlock(const FlowBlock *SrcBlock, const FlowBlock *DstBlock,
+                      const FlowBlock *Block, uint64_t BlockFlow) {
+    // Process all successor jumps and update corresponding flow values
+    size_t BlockDegree = 0;
+    for (auto *Jump : Block->SuccJumps) {
+      if (ignoreJump(SrcBlock, DstBlock, Jump))
+        continue;
+      BlockDegree++;
+    }
+    // If all successor jumps of the block are ignored, skip it
+    if (DstBlock == nullptr && BlockDegree == 0)
+      return;
+    assert(BlockDegree > 0 && "all outgoing jumps are ignored");
+
+    // Each of the Block's successors gets the following amount of flow.
+    // Rounding the value up so that all flow is propagated
+    uint64_t SuccFlow = (BlockFlow + BlockDegree - 1) / BlockDegree;
+    for (auto *Jump : Block->SuccJumps) {
+      if (ignoreJump(SrcBlock, DstBlock, Jump))
+        continue;
+      uint64_t Flow = std::min(SuccFlow, BlockFlow);
+      Jump->Flow = Flow;
+      BlockFlow -= Flow;
+    }
+    assert(BlockFlow == 0 && "not all flow is propagated");
+  }
+
+  ///确认子图是否有cycle，还没仔细看过规则?
+    /// Verify if the given unknown subgraph is acyclic, and if yes, reorder
+  /// UnknownBlocks in the topological order (so that all jumps are "forward").
+  bool isAcyclicSubgraph(const FlowBlock *SrcBlock, const FlowBlock *DstBlock,
+                         std::vector<FlowBlock *> &UnknownBlocks) {
+    // Extract local in-degrees in the considered subgraph
+    auto LocalInDegree = std::vector<uint64_t>(NumBlocks(), 0);
+    auto fillInDegree = [&](const FlowBlock *Block) {
+      for (auto *Jump : Block->SuccJumps) {
+        if (ignoreJump(SrcBlock, DstBlock, Jump))
+          continue;
+        LocalInDegree[Jump->Target]++;
+      }
+    };
+    fillInDegree(SrcBlock);
+    for (auto *Block : UnknownBlocks) {
+      fillInDegree(Block);
+    }
+    // A loop containing SrcBlock
+    if (LocalInDegree[SrcBlock->Index] > 0)
+      return false;
+
+    std::vector<FlowBlock *> AcyclicOrder;
+    std::queue<uint64_t> Queue;
+    Queue.push(SrcBlock->Index);
+    while (!Queue.empty()) {
+      FlowBlock *Block = &Func.Blocks[Queue.front()];
+      Queue.pop();
+      // Stop propagation once we reach DstBlock, if any
+      if (DstBlock != nullptr && Block == DstBlock)
+        break;
+
+      // Keep an acyclic order of unknown blocks
+      if (Block->HasUnknownWeight && Block != SrcBlock)
+        AcyclicOrder.push_back(Block);
+
+      // Add to the queue all successors with zero local in-degree
+      for (auto *Jump : Block->SuccJumps) {
+        if (ignoreJump(SrcBlock, DstBlock, Jump))
+          continue;
+        uint64_t Dst = Jump->Target;
+        LocalInDegree[Dst]--;
+        if (LocalInDegree[Dst] == 0) {
+          Queue.push(Dst);
+        }
+      }
+    }
+
+    // If there is a cycle in the subgraph, AcyclicOrder contains only a subset
+    // of all blocks
+    if (UnknownBlocks.size() != AcyclicOrder.size())
+      return false;
+    UnknownBlocks = AcyclicOrder;
+    return true;
+  }
+
+
+
+  ///还没仔细看过?
+    /// Verify if rebalancing of the subgraph is feasible. If the checks are
+  /// successful, set the unique destination block, DstBlock (can be null).
+  bool canRebalanceSubgraph(const FlowBlock *SrcBlock,
+                            const std::vector<FlowBlock *> &KnownDstBlocks,
+                            const std::vector<FlowBlock *> &UnknownBlocks,
+                            FlowBlock *&DstBlock) {
+    // If the list of unknown blocks is empty, we don't need rebalancing
+    if (UnknownBlocks.empty())
+      return false;
+
+    // If there are multiple known sinks, we can't rebalance
+    if (KnownDstBlocks.size() > 1)
+      return false;
+    DstBlock = KnownDstBlocks.empty() ? nullptr : KnownDstBlocks.front();
+
+    // Verify sinks of the subgraph
+    for (auto *Block : UnknownBlocks) {
+      if (Block->SuccJumps.empty()) {
+        // If there are multiple (known and unknown) sinks, we can't rebalance
+        if (DstBlock != nullptr)
+          return false;
+        continue;
+      }
+      size_t NumIgnoredJumps = 0;
+      for (auto *Jump : Block->SuccJumps) {
+        if (ignoreJump(SrcBlock, DstBlock, Jump))
+          NumIgnoredJumps++;
+      }
+      // If there is a non-sink block in UnknownBlocks with all jumps ignored,
+      // then we can't rebalance
+      if (NumIgnoredJumps == Block->SuccJumps.size())
+        return false;
+    }
+
+    return true;
+  }
+
+  //一路把这个unknown的blocks给推下去，为什么要这么做?  
+  void findUnknownSubgraph(const FlowBlock *SrcBlock,std::vector<FlowBlock *> &KnownDstBlocks,std::vector<FlowBlock *> &UnknownBlocks) {
+    auto Visited = BitVector(NumBlocks(), false);
+    std::queue<uint64_t> Queue;
+
+    Queue.push(SrcBlock->Index);
+    Visited[SrcBlock->Index] = true;
+    while(!Queue.empty()){
+      auto &Block = Func.Blocks[Queue.front()];
+      Queue.pop();
+      for(auto *Jump:Block.SuccJumps){
+        if(ignoreJump(SrcBlock, nullptr, Jump))
+          continue;
+
+        uint64_t Dst = Jump->Target;
+        if(Visited[Dst])
+          continue;
+        Visited[Dst]=true;
+        if (!Func.Blocks[Dst].HasUnknownWeight) {
+          KnownDstBlocks.push_back(&Func.Blocks[Dst]);
+        } else {
+          Queue.push(Dst);
+          UnknownBlocks.push_back(&Func.Blocks[Dst]);
+        }
+      }
+    }
+
+  
+  }
+
+  //决定这个jump是否要ignored，具体规则有点奇怪?
+  bool ignoreJump(const FlowBlock *SrcBlock, const FlowBlock *DstBlock,
+                  const FlowJump *Jump) {
+    // Ignore unlikely jumps with zero flow
+    if (Jump->IsUnlikely && Jump->Flow == 0)
+      return true;
+
+    auto JumpSource = &Func.Blocks[Jump->Source];
+    auto JumpTarget = &Func.Blocks[Jump->Target];
+
+    // Do not ignore jumps coming into DstBlock
+    if (DstBlock != nullptr && JumpTarget == DstBlock)
+      return false;
+
+    // Ignore jumps out of SrcBlock to known blocks
+    if (!JumpTarget->HasUnknownWeight && JumpSource == SrcBlock)
+      return true;
+
+    // Ignore jumps to known blocks with zero flow
+    if (!JumpTarget->HasUnknownWeight && JumpTarget->Flow == 0)
+      return true;
+
+    return false;
+  }
+
+  //判断是否可以从root进行rebalance
+  bool canRebalanceAtRoot(const FlowBlock *SrcBlock) {
+    // Do not attempt to find unknown subgraphs from an unknown or a
+    // zero-flow block+
+    if (SrcBlock->HasUnknownWeight || SrcBlock->Flow == 0)
+      return false;
+
+    // Do not attempt to process subgraphs from a block w/o unknown sucessors
+    bool HasUnknownSuccs = false;
+    for (auto *Jump : SrcBlock->SuccJumps) {
+      if (Func.Blocks[Jump->Target].HasUnknownWeight) {
+        HasUnknownSuccs = true;
+        break;
+      }
+    }
+    if (!HasUnknownSuccs)
+      return false;
+
+    return true;
+  }
+
+  
+
+const ProfiParams &Params;
+FlowFunction &Func;
+uint64_t NumBlocks() const { return Func.Blocks.size(); }
+static constexpr uint64_t AnyExitBlock = uint64_t(-1);
+//最小的baseDis，在island join的时候
+static constexpr uint64_t MinBaseDistance = 10000;
+};
+
 
 
 } // end anonymous namespace
@@ -861,7 +1413,8 @@ void solveMCF(BinaryFunction &BF, MCFCostFunction CostFunction) {
 
 void estimateEdgeCounts(BinaryFunction &BF) {
   if(opts::UseProfi){
-    /*1. Initialization MCF*/
+    
+
     InitializationMCF(BF);
     solveMCF(BF,MCF_PROFI);
     return ;
