@@ -43,6 +43,11 @@ IterativeGuess(
     "iterative-guess",
     cl::desc("in non-LBR mode, guess edge counts using iterative technique"),
     cl::Hidden, cl::cat(BoltOptCategory));
+static cl::opt<bool> 
+DoNothing(
+    "nothing-to-do",
+    cl::desc("in non-LBR mode, nothing-to-do"),
+    cl::Hidden, cl::cat(BoltOptCategory));
 
 static cl::opt<bool> UseRArcs(
     "mcf-use-rarcs",
@@ -61,57 +66,43 @@ cl::opt<unsigned> StaleMatchingMaxFuncSize(
     "max-func-size",
     cl::desc("The maximum size of a function to consider for inference."),
     cl::init(10000), cl::Hidden, cl::cat(BoltOptCategory));
-cl::opt<bool> StaleMatchingEvenFlowDistribution(
-    "even-flow-distribution",
+static cl::opt<bool> SampleProfileEvenFlowDistribution(
+    "bolt-sample-profile-even-flow-distribution", cl::init(true), cl::Hidden,
     cl::desc("Try to evenly distribute flow when there are multiple equally "
-             "likely options."),
-    cl::init(true), cl::ReallyHidden, cl::cat(BoltOptCategory));
+             "likely options."));
 
-cl::opt<bool> StaleMatchingRebalanceUnknown(
-    "rebalance-unknown",
-    cl::desc("Evenly re-distribute flow among unknown subgraphs."),
-    cl::init(false), cl::ReallyHidden, cl::cat(BoltOptCategory));
+static cl::opt<bool> SampleProfileRebalanceUnknown(
+    "bolt-sample-profile-rebalance-unknown", cl::init(true), cl::Hidden,
+    cl::desc("Evenly re-distribute flow among unknown subgraphs."));
 
-cl::opt<bool> StaleMatchingJoinIslands(
-    "join-islands",
-    cl::desc("Join isolated components having positive flow."), cl::init(true),
-    cl::ReallyHidden, cl::cat(BoltOptCategory));
+static cl::opt<bool> SampleProfileJoinIslands(
+    "bolt-sample-profile-join-islands", cl::init(true), cl::Hidden,
+    cl::desc("Join isolated components having positive flow."));
 
-cl::opt<unsigned> StaleMatchingCostBlockInc(
-    "cost-block-inc",
-    cl::desc("The cost of increasing a block count by one."), cl::init(150),
-    cl::ReallyHidden, cl::cat(BoltOptCategory));
+static cl::opt<unsigned> SampleProfileProfiCostBlockInc(
+    "bolt-sample-profile-profi-cost-block-inc", cl::init(10), cl::Hidden,
+    cl::desc("The cost of increasing a block's count by one."));
 
-cl::opt<unsigned> StaleMatchingCostBlockDec(
-    "cost-block-dec",
-    cl::desc("The cost of decreasing a block count by one."), cl::init(150),
-    cl::ReallyHidden, cl::cat(BoltOptCategory));
+static cl::opt<unsigned> SampleProfileProfiCostBlockDec(
+    "bolt-sample-profile-profi-cost-block-dec", cl::init(20), cl::Hidden,
+    cl::desc("The cost of decreasing a block's count by one."));
 
-cl::opt<unsigned> StaleMatchingCostJumpInc(
-    "cost-jump-inc",
-    cl::desc("The cost of increasing a jump count by one."), cl::init(150),
-    cl::ReallyHidden, cl::cat(BoltOptCategory));
+static cl::opt<unsigned> SampleProfileProfiCostBlockEntryInc(
+    "bolt-sample-profile-profi-cost-block-entry-inc", cl::init(40), cl::Hidden,
+    cl::desc("The cost of increasing the entry block's count by one."));
 
-cl::opt<unsigned> StaleMatchingCostJumpDec(
-    "cost-jump-dec",
-    cl::desc("The cost of decreasing a jump count by one."), cl::init(150),
-    cl::ReallyHidden, cl::cat(BoltOptCategory));
+static cl::opt<unsigned> SampleProfileProfiCostBlockEntryDec(
+    "bolt-sample-profile-profi-cost-block-entry-dec", cl::init(10), cl::Hidden,
+    cl::desc("The cost of decreasing the entry block's count by one."));
 
-cl::opt<unsigned> StaleMatchingCostBlockUnknownInc(
-    "cost-block-unknown-inc",
-    cl::desc("The cost of increasing an unknown block count by one."),
-    cl::init(1), cl::ReallyHidden, cl::cat(BoltOptCategory));
+static cl::opt<unsigned> SampleProfileProfiCostBlockZeroInc(
+    "bolt-sample-profile-profi-cost-block-zero-inc", cl::init(11), cl::Hidden,
+    cl::desc("The cost of increasing a count of zero-weight block by one."));
 
-cl::opt<unsigned> StaleMatchingCostJumpUnknownInc(
-    "cost-jump-unknown-inc",
-    cl::desc("The cost of increasing an unknown jump count by one."),
-    cl::init(140), cl::ReallyHidden, cl::cat(BoltOptCategory));
+static cl::opt<unsigned> SampleProfileProfiCostBlockUnknownInc(
+    "bolt-sample-profile-profi-cost-block-unknown-inc", cl::init(0), cl::Hidden,
+    cl::desc("The cost of increasing an unknown block's count by one."));
 
-cl::opt<unsigned> StaleMatchingCostJumpUnknownFTInc(
-    "cost-jump-unknown-ft-inc",
-    cl::desc(
-        "The cost of increasing an unknown fall-through jump count by one."),
-    cl::init(3), cl::ReallyHidden, cl::cat(BoltOptCategory));
 
 
 } // namespace opts
@@ -496,8 +487,8 @@ createFlowFunction(const BinaryFunction::BasicBlockOrderType &BlockOrder) {
       FlowJump &Jump = Func.Jumps.back();
       Jump.Source = SrcBB->getIndex() + 1;
       Jump.Target = DstBB->getIndex() + 1;
-      Jump.Weight =  SrcBB->getBranchInfo(*DstBB).Count;
-      if(Jump.Weight != 0) Jump.HasUnknownWeight = false;
+      // Jump.Weight =  SrcBB->getBranchInfo(*DstBB).Count;
+      // if(Jump.Weight != 0) Jump.HasUnknownWeight = false;
       InDegree[Jump.Target]++;
       UniqueSuccs.insert(DstBB);
     }
@@ -624,22 +615,15 @@ void equalizeBBCounts(DataflowInfoManager &Info, BinaryFunction &BF) {
 void applyInference(FlowFunction &Func) {
   ProfiParams Params;
   // Set the params from the command-line flags.
-  Params.EvenFlowDistribution = opts::StaleMatchingEvenFlowDistribution;
-  Params.RebalanceUnknown = opts::StaleMatchingRebalanceUnknown;
-  Params.JoinIslands = opts::StaleMatchingJoinIslands;
-
-  Params.CostBlockInc = opts::StaleMatchingCostBlockInc;
-  Params.CostBlockEntryInc = opts::StaleMatchingCostBlockInc;
-  Params.CostBlockDec = opts::StaleMatchingCostBlockDec;
-  Params.CostBlockEntryDec = opts::StaleMatchingCostBlockDec;
-  Params.CostBlockUnknownInc = opts::StaleMatchingCostBlockUnknownInc;
-
-  Params.CostJumpInc = opts::StaleMatchingCostJumpInc;
-  Params.CostJumpFTInc = opts::StaleMatchingCostJumpInc;
-  Params.CostJumpDec = opts::StaleMatchingCostJumpDec;
-  Params.CostJumpFTDec = opts::StaleMatchingCostJumpDec;
-  Params.CostJumpUnknownInc = opts::StaleMatchingCostJumpUnknownInc;
-  Params.CostJumpUnknownFTInc = opts::StaleMatchingCostJumpUnknownFTInc;
+  Params.EvenFlowDistribution = opts::SampleProfileEvenFlowDistribution;
+  Params.RebalanceUnknown = opts::SampleProfileRebalanceUnknown;
+  Params.JoinIslands = opts::SampleProfileJoinIslands;
+  Params.CostBlockInc = opts::SampleProfileProfiCostBlockInc;
+  Params.CostBlockDec = opts::SampleProfileProfiCostBlockDec;
+  Params.CostBlockEntryInc = opts::SampleProfileProfiCostBlockEntryInc;
+  Params.CostBlockEntryDec = opts::SampleProfileProfiCostBlockEntryDec;
+  Params.CostBlockZeroInc = opts::SampleProfileProfiCostBlockZeroInc;
+  Params.CostBlockUnknownInc = opts::SampleProfileProfiCostBlockUnknownInc;
 
   applyFlowInference(Params, Func);
 }
@@ -753,7 +737,102 @@ bool canApplyInference(const FlowFunction &Func) {
   return true;
 }
 
+/// The function finds all blocks that are (i) reachable from the Entry block
+/// and (ii) do not have a path to an exit, and marks all such blocks 'cold'
+/// so that profi does not send any flow to such blocks.
+void preprocessUnreachableBlocks(FlowFunction &Func) {
+  const uint64_t NumBlocks = Func.Blocks.size();
+
+  // Start bfs from the source
+  std::queue<uint64_t> Queue;
+  std::vector<bool> VisitedEntry(NumBlocks, false);
+  for (uint64_t I = 0; I < NumBlocks; I++) {
+    FlowBlock &Block = Func.Blocks[I];
+    if (Block.isEntry()) {
+      Queue.push(I);
+      VisitedEntry[I] = true;
+      break;
+    }
+  }
+  while (!Queue.empty()) {
+    const uint64_t Src = Queue.front();
+    Queue.pop();
+    for (FlowJump *Jump : Func.Blocks[Src].SuccJumps) {
+      const uint64_t Dst = Jump->Target;
+      if (!VisitedEntry[Dst]) {
+        Queue.push(Dst);
+        VisitedEntry[Dst] = true;
+      }
+    }
+  }
+
+  // Start bfs from all sinks
+  std::vector<bool> VisitedExit(NumBlocks, false);
+  for (uint64_t I = 0; I < NumBlocks; I++) {
+    FlowBlock &Block = Func.Blocks[I];
+    if (Block.isExit() && VisitedEntry[I]) {
+      Queue.push(I);
+      VisitedExit[I] = true;
+    }
+  }
+  while (!Queue.empty()) {
+    const uint64_t Src = Queue.front();
+    Queue.pop();
+    for (FlowJump *Jump : Func.Blocks[Src].PredJumps) {
+      const uint64_t Dst = Jump->Source;
+      if (!VisitedExit[Dst]) {
+        Queue.push(Dst);
+        VisitedExit[Dst] = true;
+      }
+    }
+  }
+
+  // Make all blocks of zero weight so that flow is not sent
+  for (uint64_t I = 0; I < NumBlocks; I++) {
+    FlowBlock &Block = Func.Blocks[I];
+    if (Block.Weight == 0)
+      continue;
+    if (!VisitedEntry[I] || !VisitedExit[I]) {
+      Block.Weight = 0;
+      Block.HasUnknownWeight = true;
+      Block.IsUnlikely = true;
+      for (FlowJump *Jump : Block.SuccJumps) {
+        if (Jump->Source == Block.Index && Jump->Target == Block.Index) {
+          Jump->Weight = 0;
+          Jump->HasUnknownWeight = true;
+          Jump->IsUnlikely = true;
+        }
+      }
+    }
+  }
+}
+
+
+void OutputBB(BinaryFunction &BF,bool isResult) {
+    if(isResult) outs()<<"This is Result:\n";
+    else outs()<<"This is Before:\n";
+    outs()<<"BF name :"<<BF.getOneName()<<" \n";
+    for (BinaryBasicBlock &BB : BF) {
+      outs()<<"[ "  << BB.getOffset() <<" , "<<BB.getExecutionCount()<<"  ] \n";
+    }
+
+}
+
+
 void estimateEdgeCounts(BinaryFunction &BF) {
+  // OutputBB(BF,false);
+  if(opts::UseProfi){
+      const BinaryFunction::BasicBlockOrderType BlockOrder(BF.getLayout().block_begin(), BF.getLayout().block_end());
+      FlowFunction Func = createFlowFunction(BlockOrder);
+      preprocessUnreachableBlocks(Func);
+        // Check if profile inference can be applied for the instance.
+      if (canApplyInference(Func)){
+          applyInference(Func);
+          assignProfile(BF, BlockOrder, Func);
+      }
+      // OutputBB(BF,true);
+      return ;
+  }
 
   EdgeWeightMap PredEdgeWeights;
   EdgeWeightMap SuccEdgeWeights;
@@ -773,18 +852,8 @@ void estimateEdgeCounts(BinaryFunction &BF) {
     guessEdgeByRelHotness(BF, /*UseSuccs=*/false, PredEdgeWeights,
                           SuccEdgeWeights);
   recalculateBBCounts(BF, /*AllEdges=*/false);
+  // OutputBB(BF,true);
 
-  //把BF变成Func
-  // Create a wrapper flow function to use with the profile inference algorithm.
-  const BinaryFunction::BasicBlockOrderType BlockOrder(
-    BF.getLayout().block_begin(), BF.getLayout().block_end());
-  FlowFunction Func = createFlowFunction(BlockOrder);
-
-    // Check if profile inference can be applied for the instance.
-  if (canApplyInference(Func)){
-      applyInference(Func);
-      assignProfile(BF, BlockOrder, Func);
-  }
 }
 
 
