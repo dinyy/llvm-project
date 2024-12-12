@@ -12,12 +12,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "bolt/Profile/DataReader.h"
+#include "bolt/Core/BinaryBasicBlock.h"
 #include "bolt/Core/BinaryFunction.h"
 #include "bolt/Passes/MCF.h"
 #include "bolt/Utils/Utils.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Errc.h"
+#include "llvm/Support/raw_ostream.h"
 #include <map>
 
 #undef  DEBUG_TYPE
@@ -599,6 +601,9 @@ void DataReader::readSampleData(BinaryFunction &BF) {
   }
 
   BF.ExecutionCount = TotalEntryCount;
+  for(BinaryBasicBlock &BB:BF){
+    outs()<<BF.getOneName()<<" "<<Twine::utohexstr(BB.getOffset())<<" "<<BB.getExecutionCount()<<"\n";
+  }
 
   estimateEdgeCounts(BF);
 }
