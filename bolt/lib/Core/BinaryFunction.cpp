@@ -419,19 +419,28 @@ void BinaryFunction::dump() const {
 void BinaryFunction::print(raw_ostream &OS, std::string Annotation) {
   if (!opts::shouldPrint(*this))
     return;
+  std::vector<StringRef> AllNames = getNames();
+  const char *Func_name = AllNames.begin()->data();
+  // OS << Func_name <<"\n ";
+
+  for (const BinaryBasicBlock *BB : this->BasicBlocks)
+      OS << Func_name <<" "<< BB->getExecutionCount()<<"\n";
+
+
+
 
   StringRef SectionName =
       OriginSection ? OriginSection->getName() : "<no origin section>";
   OS << "Binary Function \"" << *this << "\" " << Annotation << " {";
-  std::vector<StringRef> AllNames = getNames();
-  if (AllNames.size() > 1) {
-    OS << "\n  All names   : ";
-    const char *Sep = "";
-    for (const StringRef &Name : AllNames) {
-      OS << Sep << Name;
-      Sep = "\n                ";
-    }
-  }
+  // std::vector<StringRef> AllNames = getNames();
+  // if (AllNames.size() > 1) {
+  //   OS << "\n  All names   : ";
+  //   const char *Sep = "";
+  //   for (const StringRef &Name : AllNames) {
+  //     OS << Sep << Name;
+  //     Sep = "\n                ";
+  //   }
+  // }
   OS << "\n  Number      : " << FunctionNumber;
   OS << "\n  State       : " << CurrentState;
   OS << "\n  Address     : 0x" << Twine::utohexstr(Address);

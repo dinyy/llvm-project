@@ -18,7 +18,9 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Errc.h"
+#include <cmath>
 
+// #define DEALBB 1
 #undef  DEBUG_TYPE
 #define DEBUG_TYPE "bolt-prof"
 
@@ -124,7 +126,11 @@ uint64_t FuncSampleData::getSamples(uint64_t Start, uint64_t End) const {
   for (auto I = llvm::lower_bound(Data, Start, Compare()),
             E = llvm::lower_bound(Data, End, Compare());
        I != E; ++I)
+#ifdef DEALBB
+    Result = std::max(Result, static_cast<uint64_t>(I->Hits));
+#else
     Result += I->Hits;
+#endif
   return Result;
 }
 
@@ -583,15 +589,21 @@ void DataReader::readSampleData(BinaryFunction &BF) {
     uint64_t CurOffset = BBOffset.first;
     // Always work with samples multiplied by 1000 to avoid losing them if we
     // later need to normalize numbers
+    
     uint64_t NumSamples =
-        SampleDataOrErr->getSamples(CurOffset, LastOffset) * 1000;
+        SampleDataOrErr->getSamples(CurOffset, LastOffset)*1000;
+#ifdef DEALBB
+
+#else
     if (NormalizeByInsnCount && BBOffset.second->getNumNonPseudos()) {
       NumSamples /= BBOffset.second->getNumNonPseudos();
     } else if (NormalizeByCalls) {
       uint32_t NumCalls = BBOffset.second->getNumCalls();
       NumSamples /= NumCalls + 1;
     }
+#endif
     BBOffset.second->setExecutionCount(NumSamples);
+    // outs() <<"1 "<< BF.getNames()[0] <<" "<<CurOffset<<" "<<NumSamples<<"\n";
     if (BBOffset.second->isEntryPoint())
       TotalEntryCount += NumSamples;
     LastOffset = CurOffset;
