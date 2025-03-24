@@ -2143,6 +2143,10 @@ public:
   // adjustments.
   void handleAArch64IndirectCall(MCInst &Instruction, const uint64_t Offset);
 
+  // Check for linker veneers, which lack relocations and need manual
+  // adjustments.
+  void handleRISCVIndirectCall(MCInst &Instruction, const uint64_t Offset);
+
   /// Analyze instruction to identify a function reference.
   void analyzeInstructionForFuncReference(const MCInst &Inst);
 

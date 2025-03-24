@@ -1241,7 +1241,7 @@ void BinaryFunction::handleAArch64IndirectCall(MCInst &Instruction,
       MIB->addAnnotation(It->second, "AArch64Veneer", true);
     }
 
-    BC.addAdrpAddRelocAArch64(*this, *TargetLowBits, *TargetHiBits,
+    BC.addAdrpAddRelocAArch64(*this, *TargetLowBits, *T8argetHiBits,
                               TargetAddress);
   }
 }
@@ -1452,6 +1452,8 @@ Error BinaryFunction::disassemble() {
 
         if (BC.isAArch64())
           handleAArch64IndirectCall(Instruction, Offset);
+        else if(BC.isRISCV())
+          handleRISCVIndirectCall(Instruction, Offset);
       }
     } else if (BC.isRISCV()) {
       // Check if there's a relocation associated with this instruction.
