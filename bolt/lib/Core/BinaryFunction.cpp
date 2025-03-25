@@ -1241,7 +1241,7 @@ void BinaryFunction::handleAArch64IndirectCall(MCInst &Instruction,
       MIB->addAnnotation(It->second, "AArch64Veneer", true);
     }
 
-    BC.addAdrpAddRelocAArch64(*this, *TargetLowBits, *T8argetHiBits,
+    BC.addAdrpAddRelocAArch64(*this, *TargetLowBits, *TargetHiBits,
                               TargetAddress);
   }
 }

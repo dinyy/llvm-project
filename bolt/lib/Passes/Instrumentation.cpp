@@ -160,6 +160,64 @@ static bool hasAArch64ExclusiveMemop(
       BBQueue.push({BBS, IsLoad});
   }
 
+  while (!BBQueue.empty()) {
+    BinaryBasicBlock *BB = BBQueue.front().first;
+    bool IsLoad = BBQueue.front().second;
+    BBQueue.pop();
+    if (!Visited.insert(BB).second)
+        continue;
+
+    for (const MCInst &Inst : *BB) {
+        // 检测连续的LR指令
+        if (BC.MIB->isRISCVLoadReserved(Inst) && IsLoad) {
+            if (opts::Verbosity >= 2) {
+                outs() << "BOLT-INSTRUMENTER: function " << Function.getPrintName()
+                       << " has consecutive LR instructions. Ignoring the function.\n";
+            }
+            return true;
+        }
+
+        // 更新LR状态
+        if (BC.MIB->isRISCVLoadReserved(Inst))
+            IsLoad = true;
+
+        // 标记需要跳过的BB
+        if (IsLoad && BBToSkip.insert(BB).second) {
+            if (opts::Verbosity >= 2) {
+                outs() << "BOLT-INSTRUMENTER: skip BB " << BB->getName()
+                       << " due to atomic sequence in function "
+                       << Function.getPrintName() << "\n";
+            }
+        }
+
+        // 检测孤立的SC指令
+        if (!IsLoad && BC.MIB->isRISCVStoreConditional(Inst)) {
+            if (opts::Verbosity >= 2) {
+                outs() << "BOLT-INSTRUMENTER: function " << Function.getPrintName()
+                       << " has SC without preceding LR. Ignoring the function.\n";
+            }
+            return true;
+        }
+
+        // SC指令会清除保留状态
+        if (IsLoad && BC.MIB->isRISCVStoreConditional(Inst))
+            IsLoad = false;
+    }
+
+    // 检测末尾未配对的LR
+    if (IsLoad && BB->succ_size() == 0) {
+        if (opts::Verbosity >= 2) {
+            outs() << "BOLT-INSTRUMENTER: function " << Function.getPrintName()
+                   << " has dangling LR in terminal BB. Ignoring the function.\n";
+        }
+        return true;
+    }
+
+    // 传播状态到后继基本块
+    for (BinaryBasicBlock *BBS : BB->successors())
+        BBQueue.push({BBS, IsLoad});
+  }
+
   if (BBToSkip.size() == Visited.size()) {
     if (opts::Verbosity >= 2) {
       outs() << "BOLT-INSTRUMENTER: all BBs are marked with true. Ignoring the "

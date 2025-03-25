@@ -662,6 +662,17 @@ public:
     return false;
   }
 
+  virtual bool isRISCVLoadReserved(const MCInst &Inst) const {
+    llvm_unreachable("not implemented");
+    return false;
+  }
+
+  virtual bool isRISCVStoreConditional(const MCInst &Inst) const {
+    llvm_unreachable("not implemented");
+    return false;
+  }
+
+
   virtual bool isCleanRegXOR(const MCInst &Inst) const {
     llvm_unreachable("not implemented");
     return false;

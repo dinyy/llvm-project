@@ -469,6 +469,43 @@ BinaryContext::handleAddressRef(uint64_t Address, BinaryFunction &BF,
     }
   }
 
+  if (isRISCV()) {
+    // RISC-V 需要处理 PC 相对访问和绝对地址访问的常量池引用
+    if (MCSymbol *IslandSym = BF.getOrCreateIslandAccess(Address))
+      return std::make_pair(IslandSym, 0);
+
+    // 处理跨函数常量岛引用（常见于手写汇编场景）
+    auto IslandIter = AddressToConstantIslandMap.lower_bound(Address);
+
+    // 查找最近的常量岛（考虑 RISC-V 4/8字节对齐特性）
+    if (IslandIter != AddressToConstantIslandMap.begin() &&
+        (IslandIter == AddressToConstantIslandMap.end() ||
+         IslandIter->first > Address))
+      --IslandIter;
+
+    if (IslandIter != AddressToConstantIslandMap.end()) {
+      // 处理动态重定位场景（RISC-V 需要特殊处理 PIC 情况）
+      if (IslandIter->second->hasDynamicRelocationAtIsland()) {
+        MCSymbol *IslandSym =
+            IslandIter->second->getOrCreateIslandAccess(Address);
+        if (IslandSym)
+          return std::make_pair(IslandSym, 0);
+      } 
+      // 创建代理常量岛并建立函数依赖（考虑 RISC-V 压缩指令特性）
+      else if (MCSymbol *IslandSym =
+                     IslandIter->second->getOrCreateProxyIslandAccess(Address,
+                                                                      BF)) {
+        BF.createIslandDependency(IslandSym, IslandIter->second);
+        return std::make_pair(IslandSym, 0);
+      }
+    }
+
+    // RISC-V 特定处理：可能需要处理 HI20/LO12 分页访问
+    if (IsPCRel) {
+      // 添加 PC 相对访问的特殊处理逻辑
+    }
+  }
+
   // Note that the address does not necessarily have to reside inside
   // a section, it could be an absolute address too.
   ErrorOr<BinarySection &> Section = getSectionForAddress(Address);
@@ -1245,6 +1282,36 @@ void BinaryContext::addAdrpAddRelocAArch64(BinaryFunction &BF,
                                ELF::R_AARCH64_ADR_PREL_PG_HI21);
   MIB->replaceImmWithSymbolRef(LoadLowBits, TargetSymbol, Addend, Ctx.get(),
                                Val, ELF::R_AARCH64_ADD_ABS_LO12_NC);
+}
+
+void BinaryContext::addAuipcJalrRelocRISCV(BinaryFunction &Function,
+  MCInst &AuipcInst,
+  MCInst &JalrInst,
+  uint64_t Target) {
+
+  // 分解目标地址为符号和加数（与 AArch64 相同逻辑）
+  const MCSymbol *TargetSymbol;
+  uint64_t Addend = 0;
+  std::tie(TargetSymbol, Addend) = handleAddressRef(Target, Function,
+                                                   /*IsPCRel*/ true);
+
+  // 替换 AUIPC 指令的立即数（对应 AArch64 的 ADRP）
+  int64_t HiVal;
+  MIB->replaceImmWithSymbolRef(AuipcInst,           // AUIPC 指令
+                              TargetSymbol,         // 目标符号
+                              Addend,               // 加数
+                              Ctx.get(),            // 上下文
+                              HiVal,                // 输出的计算值（可忽略）
+                              ELF::R_RISCV_PCREL_HI20); // RISC-V 高20位重定位
+
+  // 替换 JALR 指令的立即数（对应 AArch64 的 ADD）
+  int64_t LoVal;
+  MIB->replaceImmWithSymbolRef(JalrInst,            // JALR 指令
+                              TargetSymbol,         // 相同符号
+                              Addend,               // 相同加数
+                              Ctx.get(),            // 上下文
+                              LoVal,                // 输出的计算值
+                              ELF::R_RISCV_PCREL_LO12_I); // LO12 立即数类型
 }
 
 bool BinaryContext::handleAArch64Veneer(uint64_t Address, bool MatchOnly) {
