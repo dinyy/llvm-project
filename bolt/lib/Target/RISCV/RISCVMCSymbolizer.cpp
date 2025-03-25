@@ -21,7 +21,7 @@
 namespace llvm {
 namespace bolt {
 
-    RISCVMCSymbolizer::~RISCVMCSymbolizer() {}
+RISCVMCSymbolizer::~RISCVMCSymbolizer() {}
 
 bool RISCVMCSymbolizer::tryAddingSymbolicOperand(
     MCInst &Inst, raw_ostream &CStream, int64_t Value, uint64_t InstAddress,

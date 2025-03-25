@@ -1,5 +1,6 @@
 set(LLVM_LINK_COMPONENTS
   MC
+  MCDisassembler
   Support
   RISCVDesc
   )
@@ -20,7 +21,6 @@ endif()
 add_llvm_library(LLVMBOLTTargetRISCV
   RISCVMCPlusBuilder.cpp
   RISCVMCSymbolizer.cpp
-  RISCVMCSymbolizer.h
 
   NO_EXPORT
   DISABLE_LLVM_LINK_LLVM_DYLIB
@@ -29,7 +29,7 @@ add_llvm_library(LLVMBOLTTargetRISCV
   RISCVCommonTableGen
   )
 
-target_link_libraries(LLVMBOLTTargetRISCV PRIVATE LLVMBOLTCore)
+target_link_libraries(LLVMBOLTTargetRISCV PRIVATE LLVMBOLTCore LLVMBOLTUtils)
 
 include_directories(
   ${LLVM_MAIN_SRC_DIR}/lib/Target/RISCV
