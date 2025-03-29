@@ -82,7 +82,8 @@ endforeach()
 
 set(BOLT_ENABLE_RUNTIME_default OFF)
 if ((CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64"
-    OR CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+    OR CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$"
+    OR CMAKE_SYSTEM_PROCESSOR STREQUAL "riscv64")
     AND (CMAKE_SYSTEM_NAME STREQUAL "Linux"
       OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     AND (NOT CMAKE_CROSSCOMPILING))
@@ -134,7 +135,7 @@ if (LLVM_INCLUDE_TESTS)
           and lld binaries in BOLT_CLANG_EXE and BOLT_LLD_EXE.")
   endif()
 endif()
-
+set(BOLT_ENABLE_RUNTIME TRUE)
 if (BOLT_ENABLE_RUNTIME)
   message(STATUS "Building BOLT runtime libraries for X86")
   set(extra_args "")

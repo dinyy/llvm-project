@@ -1250,11 +1250,9 @@ void BinaryFunction::handleRISCVIndirectCall(MCInst &Instruction,const uint64_t 
   auto &MIB = BC.MIB;
   const uint64_t AbsoluteInstrAddr = getAddress() + Offset;
   
-  // RISC-V 使用 AUIPC + JALR 组合处理远跳转
   MCInst *AuipcInst, *JalrInst;
   uint64_t TargetAddress, Count;
   
-  // 匹配链接器 veneer 模式 (例如 AUIPC + JALR)
   Count = MIB->matchLinkerVeneer(Instructions.begin(), Instructions.end(),
                                      AbsoluteInstrAddr, Instruction,
                                      AuipcInst, JalrInst, TargetAddress);
@@ -1262,14 +1260,12 @@ void BinaryFunction::handleRISCVIndirectCall(MCInst &Instruction,const uint64_t 
   if (Count) {
     MIB->addAnnotation(Instruction, "RISCVVeneer", true);
     
-    // 标记相关指令为 veneer
     --Count;
     for (auto It = std::prev(Instructions.end()); Count != 0;
          It = std::prev(It), --Count) {
       MIB->addAnnotation(It->second, "RISCVVeneer", true);
     }
 
-    // 添加 RISC-V 特定的重定位信息
     BC.addAuipcJalrRelocRISCV(*this, *AuipcInst, *JalrInst, TargetAddress);
   }
 }

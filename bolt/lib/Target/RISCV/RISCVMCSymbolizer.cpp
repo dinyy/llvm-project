@@ -51,27 +51,28 @@ bool RISCVMCSymbolizer::tryAddingSymbolicOperand(
 
 
     if (Addend)
-    Expr = MCBinaryExpr::createAdd(Expr, MCConstantExpr::create(Addend, *Ctx),
-                      *Ctx);
+      Expr = MCBinaryExpr::createAdd(Expr, MCConstantExpr::create(Addend, *Ctx),
+                        *Ctx);
     Inst.addOperand(MCOperand::createExpr(
     BC.MIB->getTargetExprFor(Inst, Expr, *Ctx, RelType)));
   };
 
   if (Relocation) {
     switch (Relocation->Type) {
-    case ELF::R_RISCV_CALL:
-    case ELF::R_RISCV_CALL_PLT: {
-      const MCSymbol *Symbol = Ctx->getOrCreateSymbol(Relocation->Symbol->getName());
-      addOperand(Symbol, Relocation->Addend, Relocation->Type);
-      return true;
-    }
-    case ELF::R_RISCV_PCREL_HI20: {
-      const MCSymbol *Symbol = Ctx->getOrCreateSymbol(Relocation->Symbol->getName());
-      addOperand(Symbol, Relocation->Addend, ELF::R_RISCV_PCREL_HI20);
-      // 可能需要添加对应的 LO12 重定位
-      return true;
-    }
-    // 处理其他 RISC-V 重定位类型
+      case ELF::R_RISCV_CALL:
+      case ELF::R_RISCV_CALL_PLT: {
+        const MCSymbol *Symbol = Ctx->getOrCreateSymbol(Relocation->Symbol->getName());
+        addOperand(Symbol, Relocation->Addend, Relocation->Type);
+        return true;
+      }
+      case ELF::R_RISCV_PCREL_HI20: {
+        // 添加 HI20 表达式
+        addOperand(Symbol, Relocation->Addend, ELF::R_RISCV_PCREL_HI20);
+        // 自动生成 LO12 重定位（伪代码）
+        uint64_t LO12Offset = InstOffset + 4; // 假设下一条指令是 LO12
+        Function.addRelocation(LO12Offset, Symbol, ELF::R_RISCV_PCREL_LO12_I, 0, 0);
+        return true;
+      }
     }
   }  
   Value += InstAddress;

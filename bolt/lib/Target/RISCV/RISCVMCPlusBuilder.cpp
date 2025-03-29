@@ -41,6 +41,58 @@ public:
                          bool CreateNewSymbols) const override {
     return std::make_unique<RISCVMCSymbolizer>(Function, CreateNewSymbols);
   }
+
+  /// Extract annotation value from immediate operand value.
+  static int64_t extractAnnotationValue(int64_t ImmValue) {
+    return SignExtend64<56>(ImmValue & 0xff'ffff'ffff'ffffULL);
+  }
+
+  static int64_t encodeAnnotationImm(uint8_t Index, int64_t Value) {
+    if (LLVM_UNLIKELY(Value != extractAnnotationValue(Value)))
+      report_fatal_error("annotation value out of range");
+
+    Value &= 0xff'ffff'ffff'ffff;
+    Value |= (int64_t)Index << 56;
+
+    return Value;
+  }
+
+  std::optional<unsigned> getFirstAnnotationOpIndex(const MCInst &Inst) const {
+    const unsigned NumPrimeOperands = MCPlus::getNumPrimeOperands(Inst);
+    if (Inst.getNumOperands() == NumPrimeOperands)
+      return std::nullopt;
+
+    assert(Inst.getOperand(NumPrimeOperands).getInst() == nullptr &&
+           "Empty instruction expected.");
+
+    return NumPrimeOperands + 1;
+  }
+
+  static uint8_t extractAnnotationIndex(int64_t ImmValue) {
+    return ImmValue >> 56;
+  }
+
+  void customSetAnnotationOpValue(MCInst &Inst, unsigned Index, int64_t Value) const {
+    // 复制或改编 MCPlusBuilder::setAnnotationOpValue 的逻辑
+    const int64_t AnnotationValue = encodeAnnotationImm(Index, Value);
+    const std::optional<unsigned> FirstAnnotationOp =
+        getFirstAnnotationOpIndex(Inst);
+    if (!FirstAnnotationOp) {
+      Inst.addOperand(MCOperand::createInst(nullptr));
+      Inst.addOperand(MCOperand::createImm(AnnotationValue));
+      return;
+    }
+
+    for (unsigned I = *FirstAnnotationOp; I < Inst.getNumOperands(); ++I) {
+      const int64_t ImmValue = Inst.getOperand(I).getImm();
+      if (extractAnnotationIndex(ImmValue) == Index) {
+        Inst.getOperand(I).setImm(AnnotationValue);
+        return;
+      }
+    }
+
+    Inst.addOperand(MCOperand::createImm(AnnotationValue));
+  }
   
   bool equals(const MCTargetExpr &A, const MCTargetExpr &B,
               CompFuncTy Comp) const override {
@@ -182,13 +234,13 @@ bool isLoadDouble(const MCInst &Inst) const{
   }
 }
 
-  bool isPush(const MCInst &Inst) const override {
-    return isStoreToStack(Inst);
-  };
+  // bool isPush(const MCInst &Inst) const override {
+  //   return isStoreToStack(Inst);
+  // };
 
-  bool isPop(const MCInst &Inst) const override {
-    return isLoadFromStack(Inst);
-  };
+  // bool isPop(const MCInst &Inst) const override {
+  //   return isLoadFromStack(Inst);
+  // };
 
   bool isRISCVLoadReserved(const MCInst &Inst) const override{
     const unsigned Opcode = Inst.getOpcode();
@@ -372,7 +424,11 @@ uint64_t matchLinkerVeneer(InstructionIterator Begin, InstructionIterator End,
           Instruction.getOperand(0).getReg() == RISCV::X0)
         return IndirectBranchType::POSSIBLE_TAIL_CALL;
     }
-    //TODO:analyzeIndirectBranchFragment
+    // auipc x10, %got_pcrel_hi(function)  # 计算 GOT 高地址
+    // lw    x10, %got_pcrel_lo(function)(x10)  # 加载 GOT 条目到 x10
+    // jalr  x1, x10, 0                    # 跳转到 GOT 中的地址
+
+    // return IndirectBranchType::POSSIBLE_PIC_JUMP_TABLE;
 
     return IndirectBranchType::UNKNOWN;
   }
@@ -492,7 +548,7 @@ bool isStoreToStack(const MCInst &Inst) const {
 
     // 4. 检查寄存器是否为栈指针（x2 或别名 sp）
     const unsigned Reg = Operand.getReg();
-    if (Reg == RISCV::X2 || Reg == RISCV::SP)
+    if (Reg == RISCV::X2)
       return true;
   }
 
@@ -507,30 +563,30 @@ bool mayLoad(const MCInst &Inst) const {
 }
 
 
-  bool isLoadFromStack(const MCInst &Inst) const {
-     // 检查压缩格式的栈加载指令
-  switch (Inst.getOpcode()) {
-    case RISCV::C_LWSP:  // RV32C 压缩指令
-    case RISCV::C_LDSP:  // RV64C 压缩指令
-      return true;
-    default:
-      break;
-    }
+  // bool isLoadFromStack(const MCInst &Inst) const {
+  //    // 检查压缩格式的栈加载指令
+  // switch (Inst.getOpcode()) {
+  //   case RISCV::C_LWSP:  // RV32C 压缩指令
+  //   case RISCV::C_LDSP:  // RV64C 压缩指令
+  //     return true;
+  //   default:
+  //     break;
+  //   }
   
-    // 标准加载指令检查
-    if (!mayLoad(Inst))
-      return false;
+  //   // 标准加载指令检查
+  //   if (!mayLoad(Inst))
+  //     return false;
   
-    for (const MCOperand &Operand : useOperands(Inst)) {
-      if (!Operand.isReg())
-        continue;
+  //   for (const MCOperand &Operand : useOperands(Inst)) {
+  //     if (!Operand.isReg())
+  //       continue;
       
-      const unsigned Reg = Operand.getReg();
-      if (Reg == RISCV::X2 || Reg == RISCV::SP)
-        return true;
-    }
-    return false;
-  }
+  //     const unsigned Reg = Operand.getReg();
+  //     if (Reg == RISCV::X2 )
+  //       return true;
+  //   }
+  //   return false;
+  // }
   bool analyzeBranch(InstructionIterator Begin, InstructionIterator End,
                      const MCSymbol *&TBB, const MCSymbol *&FBB,
                      MCInst *&CondBranch,
@@ -610,7 +666,7 @@ bool mayLoad(const MCInst &Inst) const {
   }
     // 创建加载寄存器指令（ld aX, offset(sp)）
 void createLoadReg(MCInst &Inst, unsigned DestReg, unsigned BaseReg, int Offset) const{
-  assert(BaseReg == RISCV::SP && "Only SP-based loads are supported");
+  //assert(BaseReg == RISCV::X2 && "Only SP-based loads are supported");
   Inst = MCInstBuilder(RISCV::LD)  // RV64 的 ld 指令
       .addReg(DestReg)             // 目标寄存器（如 a0, a1, a6）
       .addReg(BaseReg)             // 基址寄存器（sp）
@@ -619,7 +675,7 @@ void createLoadReg(MCInst &Inst, unsigned DestReg, unsigned BaseReg, int Offset)
 
 // 创建立即数加法指令（addi sp, sp, imm）
 void createAddImm(MCInst &Inst, unsigned DestReg, unsigned SrcReg, int Imm) const{
-  assert(DestReg == SrcReg && "Only same-register addi is supported");
+  //assert(DestReg == SrcReg && "Only same-register addi is supported");
   Inst = MCInstBuilder(RISCV::ADDI)
       .addReg(DestReg)            // 目标寄存器（必须与源相同）
       .addReg(SrcReg)             // 源寄存器
@@ -687,118 +743,48 @@ InstructionListType createBEQZ(unsigned SrcReg, const MCSymbol *Target, MCContex
   return {Inst}; // 返回包含单个指令的列表
 }
 
-void createIndirectCallInst(MCInst &Inst, bool IsTailCall, unsigned AddrReg) const {
-  if (IsTailCall) {
-      // 尾调用使用 JALR x0, addr_reg, 0
-      Inst.setOpcode(RISCV::JALR);
-      Inst.addOperand(MCOperand::createReg(RISCV::X0));
-      Inst.addOperand(MCOperand::createReg(AddrReg));
-      Inst.addOperand(MCOperand::createImm(0));
-  } else {
-      // 普通调用使用 JALR ra, addr_reg, 0
-      Inst.setOpcode(RISCV::JALR);
-      Inst.addOperand(MCOperand::createReg(RISCV::X1));
-      Inst.addOperand(MCOperand::createReg(AddrReg));
-      Inst.addOperand(MCOperand::createImm(0));
-  }
+void createIndirectCallInst(MCInst &Inst, bool IsTailCall, MCPhysReg Reg) const {
+  Inst.clear();
+  Inst = MCInstBuilder(IsTailCall ? RISCV::JALR : RISCV::JALR) 
+        .addReg(IsTailCall ? RISCV::X0 : RISCV::X1)
+        .addReg(Reg)
+        .addImm(0); 
 }
 
-InstructionListType createLoadImmediate(unsigned DestReg, int Value) const {
+InstructionListType createLoadImmediate(const MCPhysReg Dest,
+                                        uint64_t Imm) const override {
   InstructionListType Insts;
-  
-  // 32位立即数加载（根据 RV32/RV64 调整）
-  MCInst lui;
-  lui.setOpcode(RISCV::LUI);
-  lui.addOperand(MCOperand::createReg(DestReg));
-  lui.addOperand(MCOperand::createImm((Value + 0x800) >> 12));
+  MCInst lui= MCInstBuilder(RISCV::LUI) 
+              .addReg(Dest)
+              .addImm((Imm >> 12) & 0xFFFFF); 
   Insts.push_back(lui);
-
-  MCInst addi;
-  addi.setOpcode(RISCV::ADDI);
-  addi.addOperand(MCOperand::createReg(DestReg));
-  addi.addOperand(MCOperand::createReg(DestReg));
-  addi.addOperand(MCOperand::createImm(Value & 0xFFF));
+  
+  MCInst addi= MCInstBuilder(RISCV::ADDI) 
+              .addReg(Dest)
+              .addReg(Dest)
+              .addImm(Imm & 0xFFF);
   Insts.push_back(addi);
 
   return Insts;
 }
 
-void createPushRegisters(MCInst &Inst, unsigned Reg1, unsigned Reg2) const {
-  // RISC-V 需要手动调整栈指针
-  Inst.setOpcode(RISCV::ADDI);
-  Inst.addOperand(MCOperand::createReg(RISCV::X2));  // 目标寄存器 sp
-  Inst.addOperand(MCOperand::createReg(RISCV::X2));  // 源寄存器 sp
-  Inst.addOperand(MCOperand::createImm(-16));         // 调整栈指针
-  
-  // 存储第一个寄存器
-  MCInst sd1;
-  sd1.setOpcode(RISCV::SD);
-  sd1.addOperand(MCOperand::createReg(Reg1));
-  sd1.addOperand(MCOperand::createReg(RISCV::X2));
-  sd1.addOperand(MCOperand::createImm(8)); // 偏移量 8
-  Inst = sd1; // 注意：实际实现需要处理多个指令
-  
-  // 存储第二个寄存器（需要额外指令槽）
-  // 实际实现应考虑指令序列生成方式
-}
 
 void convertIndirectCallToLoad(MCInst &Inst, MCPhysReg Reg) override {
   bool IsTailCall = isTailCall(Inst);
   if (IsTailCall)
     removeAnnotation(Inst, MCPlus::MCAnnotation::kTailCall);
 
-  // 处理标准 JALR 指令（非压缩格式）
-  if (Inst.getOpcode() == RISCV::JALR) {
-    // 确保有足够操作数：JALR 应有 3 个操作数
+  if (Inst.getOpcode() == RISCV::JALR || Inst.getOpcode() == RISCV::C_JALR|| Inst.getOpcode() == RISCV::C_JR) {
     if (Inst.getNumOperands() < 3)
       return;
-
-    // 获取源寄存器（第二个操作数）
     MCPhysReg SrcReg = Inst.getOperand(1).getReg();
-
-    // 转换为 MV 指令：ADDI rd, rs, 0
-    Inst.clear();
-    Inst.setOpcode(RISCV::ADDI);
-    Inst.addOperand(MCOperand::createReg(Reg));    // 目标寄存器
-    Inst.addOperand(MCOperand::createReg(SrcReg)); // 源寄存器
-    Inst.addOperand(MCOperand::createImm(0));      // 立即数 0
+    Inst.clear();     
+    Inst = MCInstBuilder(RISCV::ADDI) 
+          .addReg(Reg)
+          .addReg(SrcReg)
+          .addImm(0); 
     return;
   }
-
-  // 处理压缩格式 JALR（C.JALR）
-  if (Inst.getOpcode() == RISCV::C_JALR) {
-    // 确保至少1个操作数
-    if (Inst.getNumOperands() < 1)
-      return;
-
-    MCPhysReg SrcReg = Inst.getOperand(0).getReg();
-
-    // 转换为 ADDI 指令
-    Inst.clear();
-    Inst.setOpcode(RISCV::ADDI);
-    Inst.addOperand(MCOperand::createReg(Reg));   // 目标寄存器
-    Inst.addOperand(MCOperand::createReg(SrcReg));// 源寄存器
-    Inst.addOperand(MCOperand::createImm(0));     // 立即数 0
-    return;
-  }
-
-  // 处理尾调用伪指令（PseudoTAIL）
-  if (Inst.getOpcode() == RISCV::PseudoTAIL) {
-    // 确保至少1个操作数
-    if (Inst.getNumOperands() < 1)
-      return;
-
-    MCPhysReg SrcReg = Inst.getOperand(0).getReg();
-
-    // 转换为 ADDI 指令
-    Inst.clear();
-    Inst.setOpcode(RISCV::ADDI);
-    Inst.addOperand(MCOperand::createReg(Reg));   // 目标寄存器
-    Inst.addOperand(MCOperand::createReg(SrcReg));// 源寄存器
-    Inst.addOperand(MCOperand::createImm(0));     // 立即数 0
-    return;
-  }
-
   llvm_unreachable("Unsupported indirect call opcode");
 }
 
@@ -841,42 +827,37 @@ InstructionListType createInstrumentedIndirectCall(MCInst &&CallInst,
   MCSymbol *HandlerFuncAddr,
   int CallSiteID,
   MCContext *Ctx) override {
+    // Code sequence used to enter indirect call instrumentation helper:
+    //   spillRegs (x10,x11)
+    //   mov target x0  convertIndirectCallToLoad -> orr x0 target xzr
+    //   mov x1 CallSiteID createLoadImmediate ->
+    //   movk    x1, #0x0, lsl #48
+    //   movk    x1, #0x0, lsl #32
+    //   movk    x1, #0x0, lsl #16
+    //   movk    x1, #0x0
+    //   stp x0, x1, [sp, #-16]!
+    //   bl *HandlerFuncAddr createIndirectCall ->
+    //   adr x0 *HandlerFuncAddr -> adrp + add
+    //   blr x0
   InstructionListType Insts;
-  const unsigned ArgReg0 = RISCV::X10; // 原A0对应X10
-  const unsigned ArgReg1 = RISCV::X11; // 原A1对应X11
-  const unsigned SP = RISCV::X2;       // 栈指针寄存器
-  const unsigned RA = RISCV::X1;       // 返回地址寄存器
-  const unsigned ZeroReg = RISCV::X0;  // 零寄存器
 
-  // 1. 保存寄存器到栈（使用显式寄存器编号）
   Insts.emplace_back();
-  createPushRegisters(Insts.back(), ArgReg0, ArgReg1); // SD x10, -16(sp); SD x11, -8(sp); ADDI sp, sp, -16
-
-  // 2. 保留原始调用指令
+  spillRegs(Insts, {RISCV::X10, RISCV::X11});
   Insts.emplace_back(CallInst);
-
-  // 3. 将调用目标转换为加载到参数寄存器 x10
-  convertIndirectCallToLoad(Insts.back(), ArgReg0); // 例如：MV x10, target_reg
-
-  // 4. 加载 CallSiteID 到 x11 寄存器
-  InstructionListType LoadImm = createLoadImmediate(ArgReg1, CallSiteID);
+  convertIndirectCallToLoad(Insts.back(), RISCV::X10); 
+  InstructionListType LoadImm = createLoadImmediate(RISCV::X11, CallSiteID);
   Insts.insert(Insts.end(), LoadImm.begin(), LoadImm.end());
-
-  // 5. 再次保存参数寄存器到栈
   Insts.emplace_back();
-  createPushRegisters(Insts.back(), ArgReg0, ArgReg1);
-
-  // 6. 生成处理函数地址到 x10（保持寄存器编号一致性）
+  Insts.emplace_back();
+  reloadRegs(Insts, {RISCV::X10, RISCV::X11});
   Insts.resize(Insts.size() + 2);
-  InstructionListType Addr = materializeAddress(HandlerFuncAddr, Ctx, ArgReg0);
+  InstructionListType Addr = materializeAddress(HandlerFuncAddr, RISCV::X10);
   assert(Addr.size() == 2 && "Invalid Addr size");
   std::copy(Addr.begin(), Addr.end(), Insts.end() - Addr.size());
-
-  // 7. 生成间接调用指令（使用显式寄存器编号）
   Insts.emplace_back();
-  createIndirectCallInst(Insts.back(), isTailCall(CallInst), ArgReg0);
+  createIndirectCallInst(Insts.back(), isTailCall(CallInst), RISCV::X10);
 
-  // 8. 转移元数据
+  // Carry over metadata including tail call marker if present.
   stripAnnotations(Insts.back());
   moveAnnotations(std::move(CallInst), Insts.back());
 
@@ -889,81 +870,84 @@ InstructionListType createInstrumentedIndirectCall(MCInst &&CallInst,
                             MCContext *Ctx) override {
                               InstructionListType Insts;
 
-    // 保存 a0 和 a1 到栈中 (sp 需 16 字节对齐)
-    // addi sp, sp, -16
-    // sd a0, 0(sp)
-    // sd a1, 8(sp)
-    Insts.emplace_back();
-    createADDI(Insts.back(), RISCV::SP, RISCV::SP, -16);
-    Insts.emplace_back();
-    createSD(Insts.back(), RISCV::X10, RISCV::SP, 0);
-    Insts.emplace_back();
-    createSD(Insts.back(), RISCV::X11, RISCV::SP, 8);
+    // // 保存 a0 和 a1 到栈中 (sp 需 16 字节对齐)
+    // // addi sp, sp, -16
+    // // sd a0, 0(sp)
+    // // sd a1, 8(sp)
+    // Insts.emplace_back();
+    // createADDI(Insts.back(), RISCV::X2, RISCV::X2, -16);
+    // Insts.emplace_back();
+    // createSD(Insts.back(), RISCV::X10, RISCV::X2, 0);
+    // Insts.emplace_back();
+    // createSD(Insts.back(), RISCV::X11, RISCV::X2, 8);
 
-    // 加载 InstrTrampoline 地址到 a0
-    InstructionListType Addr = 
-        materializeAddress(InstrTrampoline, Ctx, RISCV::X10);
-    Insts.insert(Insts.end(), Addr.begin(), Addr.end());
+    // // 加载 InstrTrampoline 地址到 a0
+    // InstructionListType Addr = 
+    //     materializeAddress(InstrTrampoline, Ctx, RISCV::X10);
+    // Insts.insert(Insts.end(), Addr.begin(), Addr.end());
 
-    // 加载 Trampoline 地址值到 a0
-    // ld a0, 0(a0)
-    Insts.emplace_back();
-    createLD(Insts.back(), RISCV::X10, RISCV::X10, 0);
+    // // 加载 Trampoline 地址值到 a0
+    // // ld a0, 0(a0)
+    // Insts.emplace_back();
+    // createLD(Insts.back(), RISCV::X10, RISCV::X10, 0);
 
-    // 检查 a0 是否为 0，若为 0 跳转到处理程序
-    InstructionListType cmpJmp = 
-        createBEQZ(RISCV::X10, IndCallHandler, Ctx);
-    Insts.insert(Insts.end(), cmpJmp.begin(), cmpJmp.end());
+    // // 检查 a0 是否为 0，若为 0 跳转到处理程序
+    // InstructionListType cmpJmp = 
+    //     createBEQZ(RISCV::X10, IndCallHandler, Ctx);
+    // Insts.insert(Insts.end(), cmpJmp.begin(), cmpJmp.end());
 
-    // 保存返回地址 ra 到栈中
-    // addi sp, sp, -8
-    // sd ra, 0(sp)
-    Insts.emplace_back();
-    createADDI(Insts.back(), RISCV::SP, RISCV::SP, -8);
-    Insts.emplace_back();
-    createSD(Insts.back(), RISCV::X1, RISCV::SP, 0);
+    // // 保存返回地址 ra 到栈中
+    // // addi sp, sp, -8
+    // // sd ra, 0(sp)
+    // Insts.emplace_back();
+    // createADDI(Insts.back(), RISCV::X2, RISCV::X2, -8);
+    // Insts.emplace_back();
+    // createSD(Insts.back(), RISCV::X1, RISCV::X2, 0);
 
-    // 通过 Trampoline 执行间接调用
-    // jalr ra, a0, 0
-    Insts.emplace_back();
-    createJALR(Insts.back(), RISCV::X1, RISCV::X10, 0);
+    // // 通过 Trampoline 执行间接调用
+    // // jalr ra, a0, 0
+    // Insts.emplace_back();
+    // createJALR(Insts.back(), RISCV::X1, RISCV::X10, 0);
 
-    // 恢复返回地址 ra
-    // ld ra, 0(sp)
-    // addi sp, sp, 8
-    Insts.emplace_back();
-    createLD(Insts.back(), RISCV::X1, RISCV::SP, 0);
-    Insts.emplace_back();
-    createADDI(Insts.back(), RISCV::SP, RISCV::SP, 8);
+    // // 恢复返回地址 ra
+    // // ld ra, 0(sp)
+    // // addi sp, sp, 8
+    // Insts.emplace_back();
+    // createLD(Insts.back(), RISCV::X1, RISCV::X2, 0);
+    // Insts.emplace_back();
+    // createADDI(Insts.back(), RISCV::X2, RISCV::X2, 8);
 
-    // 尾调用至 IndCallHandler
-    Insts.emplace_back();
-    createDirectCall(Insts.back(), IndCallHandler, Ctx, /*IsTailCall*/ true);
+    // // 尾调用至 IndCallHandler
+    // Insts.emplace_back();
+    // createDirectCall(Insts.back(), IndCallHandler, Ctx, /*IsTailCall*/ true);
 
-    return Insts;
+    // return Insts;
+    return {};
   }
 
   InstructionListType createInstrumentedIndCallHandlerExitBB() const override {
-    InstructionListType Insts(6);
-    Insts.resize(6);  // 需要6条指令（原代码的Insts[5]会越界）
+    // InstructionListType Insts(6);
+    // Insts.resize(6);  // 需要6条指令（原代码的Insts[5]会越界）
 
-    // 1. 恢复 x10 (a0) 和 x11 (a1) 寄存器
-    createLoadReg(Insts[0], RISCV::X10, RISCV::X2, 0);  // ld x10, 0(x2)
-    createLoadReg(Insts[1], RISCV::X11, RISCV::X2, 8);  // ld x11, 8(x2)
-    createAddImm(Insts[2], RISCV::X2, RISCV::X2, 16);   // addi x2, x2, 16
+    // // 1. 恢复 x10 (a0) 和 x11 (a1) 寄存器
+    // createLoadReg(Insts[0], RISCV::X10, RISCV::X2, 0);  // ld x10, 0(x2)
+    // createLoadReg(Insts[1], RISCV::X11, RISCV::X2, 8);  // ld x11, 8(x2)
+    // createAddImm(Insts[2], RISCV::X2, RISCV::X2, 16);   // addi x2, x2, 16
 
-    // 2. 加载目标地址到 x16 (a6)
-    createLoadReg(Insts[3], RISCV::X16, RISCV::X2, 0); // ld x16, 0(x2)
-    createAddImm(Insts[4], RISCV::X2, RISCV::X2, 16);  // addi x2, x2, 16
+    // // 2. 加载目标地址到 x16 (a6)
+    // createLoadReg(Insts[3], RISCV::X16, RISCV::X2, 0); // ld x16, 0(x2)
+    // createAddImm(Insts[4], RISCV::X2, RISCV::X2, 16);  // addi x2, x2, 16
 
-    // 3. 跳转
-    createIndirectBranch(Insts[5], RISCV::X16);         // jalr x0, x16, 0
-    return Insts;
+    // // 3. 跳转
+    // createIndirectBranch(Insts[5], RISCV::X16);         // jalr x0, x16, 0
+    // return Insts;
+    return {};
 }
 
   InstructionListType
   createInstrumentedIndTailCallHandlerExitBB() const override {
-    return createInstrumentedIndCallHandlerExitBB();
+    // return createInstrumentedIndCallHandlerExitBB();
+    return {};
   }
   
   InstructionListType createGetter(MCContext *Ctx, const char *name) const {
@@ -988,27 +972,53 @@ InstructionListType createInstrumentedIndirectCall(MCInst &&CallInst,
   }
 
   InstructionListType createNumCountersGetter(MCContext *Ctx) const override {
-    return createGetter(Ctx, "__bolt_num_counters");
+    // return createGetter(Ctx, "__bolt_num_counters");
+    return {};
   }
 
   InstructionListType
   createInstrLocationsGetter(MCContext *Ctx) const override {
-    return createGetter(Ctx, "__bolt_instr_locations");
+    // return createGetter(Ctx, "__bolt_instr_locations");
+    return {};
   }
 
   InstructionListType createInstrTablesGetter(MCContext *Ctx) const override {
-    return createGetter(Ctx, "__bolt_instr_tables");
+    // return createGetter(Ctx, "__bolt_instr_tables");
+    return {};
   }
 
   InstructionListType createInstrNumFuncsGetter(MCContext *Ctx) const override {
-    return createGetter(Ctx, "__bolt_instr_num_funcs");
+    // return createGetter(Ctx, "__bolt_instr_num_funcs");
+    return {};
   }
+
+  InstructionListType materializeAddress(const MCSymbol *Target, MCContext *Ctx,
+    MCPhysReg RegName,
+    int64_t Addend = 0) const override {
+    InstructionListType Insts(2);
+
+    Insts[0].setOpcode(RISCV::LUI);
+    Insts[0].clear();
+    Insts[0].addOperand(MCOperand::createReg(RegName));      
+    Insts[0].addOperand(MCOperand::createImm(0));            
+    setOperandToSymbolRef(Insts[0], /* OpNum */ 1, Target, Addend, Ctx,
+    ELF::R_RISCV_HI20);
+
+    Insts[1].setOpcode(RISCV::ADDI);
+    Insts[1].clear();
+    Insts[1].addOperand(MCOperand::createReg(RegName));      
+    Insts[1].addOperand(MCOperand::createReg(RegName));      
+    Insts[1].addOperand(MCOperand::createImm(0));            
+    setOperandToSymbolRef(Insts[1], /* OpNum */ 2, Target, Addend, Ctx,
+    ELF::R_RISCV_LO12_I);
+    return Insts;
+}
 
   InstructionListType createSymbolTrampoline(const MCSymbol *TgtSym,
                               MCContext *Ctx) override {
-  InstructionListType Insts;
-  createTailCall(Insts.emplace_back(), TgtSym, Ctx);
-  return Insts;
+    InstructionListType Insts;
+    createTailCall(Insts.emplace_back(), TgtSym, Ctx);
+    return Insts;
   }
 
   const RISCVMCExpr *createSymbolRefExpr(const MCSymbol *Target,
@@ -1020,26 +1030,29 @@ InstructionListType createInstrumentedIndirectCall(MCInst &&CallInst,
   void createAuipcInstPair(InstructionListType &Insts, unsigned DestReg,
             const MCSymbol *Target, unsigned SecondOpcode,
             MCContext &Ctx) const {
-  MCInst AUIPC = MCInstBuilder(RISCV::AUIPC)
-        .addReg(DestReg)
-        .addExpr(createSymbolRefExpr(
-            Target, RISCVMCExpr::VK_RISCV_PCREL_HI, Ctx));
-  MCSymbol *AUIPCLabel = Ctx.createNamedTempSymbol("pcrel_hi");
-  // AUIPC.setSymbol(AUIPCLabel);
-  Insts.push_back(AUIPC);
+    MCInst AUIPC = MCInstBuilder(RISCV::AUIPC)
+          .addReg(DestReg)
+          .addExpr(createSymbolRefExpr(
+              Target, RISCVMCExpr::VK_RISCV_PCREL_HI, Ctx));
+    MCSymbol *AUIPCLabel = Ctx.createNamedTempSymbol("pcrel_hi");
+    // AUIPC.setSymbol(AUIPCLabel);
+    // BC.MIB->setInstLabel(AUIPC,AUIPCLabel);
+    customSetAnnotationOpValue(AUIPC, MCPlus::MCAnnotation::kLabel,
+                        reinterpret_cast<int64_t>(AUIPCLabel));
+    Insts.push_back(AUIPC);
 
-  MCInst SecondInst =
-  MCInstBuilder(SecondOpcode)
-  .addReg(DestReg)
-  .addReg(DestReg)
-  .addExpr(createSymbolRefExpr(AUIPCLabel,
-                          RISCVMCExpr::VK_RISCV_PCREL_LO, Ctx));
-  Insts.push_back(SecondInst);
+    MCInst SecondInst =
+    MCInstBuilder(SecondOpcode)
+    .addReg(DestReg)
+    .addReg(DestReg)
+    .addExpr(createSymbolRefExpr(AUIPCLabel,
+                            RISCVMCExpr::VK_RISCV_PCREL_LO, Ctx));
+    Insts.push_back(SecondInst);
   }
 
   void createLA(InstructionListType &Insts, unsigned DestReg,
   const MCSymbol *Target, MCContext &Ctx) const {
-  createAuipcInstPair(Insts, DestReg, Target, RISCV::ADDI, Ctx);
+    createAuipcInstPair(Insts, DestReg, Target, RISCV::ADDI, Ctx);
   }
 
   void createRegInc(MCInst &Inst, unsigned Reg, int64_t Imm) const {
@@ -1047,7 +1060,7 @@ InstructionListType createInstrumentedIndirectCall(MCInst &&CallInst,
   }
 
   void createSPInc(MCInst &Inst, int64_t Imm) const {
-  createRegInc(Inst, RISCV::X2, Imm);
+    createRegInc(Inst, RISCV::X2, Imm);
   }
 
   void createStore(MCInst &Inst, unsigned Reg, unsigned BaseReg,
@@ -1060,16 +1073,14 @@ InstructionListType createInstrumentedIndirectCall(MCInst &&CallInst,
   Inst = MCInstBuilder(RISCV::LD).addReg(Reg).addReg(BaseReg).addImm(Offset);
   }
 
-  void spillRegs(InstructionListType &Insts,
-  const SmallVector<unsigned> &Regs) const {
-  createSPInc(Insts.emplace_back(), -Regs.size() * 8);
+  void spillRegs(InstructionListType &Insts,const SmallVector<unsigned> &Regs) const {
+    createSPInc(Insts.emplace_back(), -Regs.size() * 8);
 
-  int64_t Offset = 0;
-  for (auto Reg : Regs) {
-  createStore(Insts.emplace_back(), Reg, RISCV::X2, Offset);
-  Offset += 8;
-  }
-
+    int64_t Offset = 0;
+    for (auto Reg : Regs) {
+      createStore(Insts.emplace_back(), Reg, RISCV::X2, Offset);
+      Offset += 8;
+    }
   }
 
   void reloadRegs(InstructionListType &Insts,
@@ -1199,11 +1210,102 @@ InstructionListType createInstrumentedIndirectCall(MCInst &&CallInst,
     }
   }
 
+  bool evaluateRISCVMemoryOperand(const MCInst &Inst, int64_t &DispImm,
+    const MCExpr **DispExpr = nullptr) const {
+      // 处理 AUIPC 指令的特殊情况
+      if (isAUIPC(Inst)) {
+      const MCOperand &Operand = Inst.getOperand(0);
+      if (Operand.isImm()) {
+      DispImm = Operand.getImm();
+      return true;
+      } else if (Operand.isExpr()) {
+      if (DispExpr) {
+      *DispExpr = Operand.getExpr();
+      return true;
+      }
+      }
+      return false;
+      }
+
+      // 处理 PC 相对寻址和常规内存操作数
+      const MCInstrDesc &MCII = Info->get(Inst.getOpcode());
+      for (unsigned I = 0, E = MCII.getNumOperands(); I != E; ++I) {
+      const MCOperandInfo &OpInfo = MCII.operands()[I];
+
+      // 识别 RISC-V 的 PC 相对操作数类型
+      if (OpInfo.OperandType == RISCV::OPERAND_PCREL_HI ||
+      OpInfo.OperandType == RISCV::OPERAND_PCREL_LO) {
+      const MCOperand &Operand = Inst.getOperand(I);
+
+      if (Operand.isImm()) {
+      DispImm = Operand.getImm();
+      // RISC-V 的 HI20 立即数需要左移 12 位
+      if (OpInfo.OperandType == RISCV::OPERAND_PCREL_HI)
+      DispImm <<= 12;
+      return true;
+      } else if (Operand.isExpr()) {
+      if (DispExpr) {
+      *DispExpr = Operand.getExpr();
+      return true;
+      }
+      }
+      return false;
+}
+
+// 处理常规内存偏移（如 lw/sw 的 offset）
+if (OpInfo.OperandType == RISCV::OPERAND_SIMM12 ||
+OpInfo.OperandType == RISCV::OPERAND_UIMM12) {
+const MCOperand &Operand = Inst.getOperand(I);
+
+if (Operand.isImm()) {
+DispImm = Operand.getImm();
+// RISC-V 的偏移是符号扩展的 12-bit 值
+DispImm = SignExtend64<12>(DispImm);
+return true;
+} else if (Operand.isExpr()) {
+if (DispExpr) {
+*DispExpr = Operand.getExpr();
+return true;
+}
+}
+return false;
+}
+}
+return false;
+}
+
   bool evaluateMemOperandTarget(const MCInst &Inst, uint64_t &Target,
-                                uint64_t Address,
-                                uint64_t Size) const override {
+    uint64_t Address,
+    uint64_t Size) const override {
+    int64_t DispValue;
+    const MCExpr *DispExpr = nullptr;
+
+    // RISC-V 内存操作数评估函数（需自定义实现）
+    if (!evaluateRISCVMemoryOperand(Inst, DispValue, &DispExpr))
     return false;
-  }
+
+    // 拒绝需要动态计算的表达式
+    if (DispExpr)
+    return false;
+
+    Target = DispValue;
+
+    // 处理 PC 相对寻址的特殊指令
+    switch (Inst.getOpcode()) {
+    case RISCV::AUIPC:  // 处理高位地址构造
+    // AUIPC 的计算方式: Target = (DispValue << 12) + (Address & ~0xFFF)
+    Target = (DispValue << 12) + (Address & ~0xFFFULL);
+    break;
+
+    case RISCV::JALR:   // 处理间接跳转（可能需要特殊处理）
+    default:
+    // 常规指令：PC 相对地址 = Address + 位移
+    Target += Address;
+    break;
+    }
+
+return true;
+}
 
   bool isCallAuipc(const MCInst &Inst) const {
     if (Inst.getOpcode() != RISCV::AUIPC)

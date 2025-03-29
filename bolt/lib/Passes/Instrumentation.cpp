@@ -160,64 +160,6 @@ static bool hasAArch64ExclusiveMemop(
       BBQueue.push({BBS, IsLoad});
   }
 
-  while (!BBQueue.empty()) {
-    BinaryBasicBlock *BB = BBQueue.front().first;
-    bool IsLoad = BBQueue.front().second;
-    BBQueue.pop();
-    if (!Visited.insert(BB).second)
-        continue;
-
-    for (const MCInst &Inst : *BB) {
-        // 检测连续的LR指令
-        if (BC.MIB->isRISCVLoadReserved(Inst) && IsLoad) {
-            if (opts::Verbosity >= 2) {
-                outs() << "BOLT-INSTRUMENTER: function " << Function.getPrintName()
-                       << " has consecutive LR instructions. Ignoring the function.\n";
-            }
-            return true;
-        }
-
-        // 更新LR状态
-        if (BC.MIB->isRISCVLoadReserved(Inst))
-            IsLoad = true;
-
-        // 标记需要跳过的BB
-        if (IsLoad && BBToSkip.insert(BB).second) {
-            if (opts::Verbosity >= 2) {
-                outs() << "BOLT-INSTRUMENTER: skip BB " << BB->getName()
-                       << " due to atomic sequence in function "
-                       << Function.getPrintName() << "\n";
-            }
-        }
-
-        // 检测孤立的SC指令
-        if (!IsLoad && BC.MIB->isRISCVStoreConditional(Inst)) {
-            if (opts::Verbosity >= 2) {
-                outs() << "BOLT-INSTRUMENTER: function " << Function.getPrintName()
-                       << " has SC without preceding LR. Ignoring the function.\n";
-            }
-            return true;
-        }
-
-        // SC指令会清除保留状态
-        if (IsLoad && BC.MIB->isRISCVStoreConditional(Inst))
-            IsLoad = false;
-    }
-
-    // 检测末尾未配对的LR
-    if (IsLoad && BB->succ_size() == 0) {
-        if (opts::Verbosity >= 2) {
-            outs() << "BOLT-INSTRUMENTER: function " << Function.getPrintName()
-                   << " has dangling LR in terminal BB. Ignoring the function.\n";
-        }
-        return true;
-    }
-
-    // 传播状态到后继基本块
-    for (BinaryBasicBlock *BBS : BB->successors())
-        BBQueue.push({BBS, IsLoad});
-  }
-
   if (BBToSkip.size() == Visited.size()) {
     if (opts::Verbosity >= 2) {
       outs() << "BOLT-INSTRUMENTER: all BBs are marked with true. Ignoring the "
@@ -229,6 +171,151 @@ static bool hasAArch64ExclusiveMemop(
 
   return false;
 }
+
+
+
+
+// static bool hasAArch64ExclusiveMemop(
+//     BinaryFunction &Function,
+//     std::unordered_set<const BinaryBasicBlock *> &BBToSkip) {
+//   // FIXME ARMv8-a architecture reference manual says that software must avoid
+//   // having any explicit memory accesses between exclusive load and associated
+//   // store instruction. So for now skip instrumentation for basic blocks that
+//   // have these instructions, since it might lead to runtime deadlock.
+//   BinaryContext &BC = Function.getBinaryContext();
+//   std::queue<std::pair<BinaryBasicBlock *, bool>> BBQueue; // {BB, isLoad}
+//   std::unordered_set<BinaryBasicBlock *> Visited;
+
+//   if (Function.getLayout().block_begin() == Function.getLayout().block_end())
+//     return 0;
+
+//   BinaryBasicBlock *BBfirst = *Function.getLayout().block_begin();
+//   BBQueue.push({BBfirst, false});
+
+//   while (!BBQueue.empty()) {
+//     BinaryBasicBlock *BB = BBQueue.front().first;
+//     bool IsLoad = BBQueue.front().second;
+//     BBQueue.pop();
+//     if (!Visited.insert(BB).second)
+//       continue;
+
+//     for (const MCInst &Inst : *BB) {
+//       // Two loads one after another - skip whole function
+//       if (BC.MIB->isAArch64ExclusiveLoad(Inst) && IsLoad) {
+//         if (opts::Verbosity >= 2) {
+//           outs() << "BOLT-INSTRUMENTER: function " << Function.getPrintName()
+//                  << " has two exclusive loads. Ignoring the function.\n";
+//         }
+//         return true;
+//       }
+
+//       if (BC.MIB->isAArch64ExclusiveLoad(Inst))
+//         IsLoad = true;
+
+//       if (IsLoad && BBToSkip.insert(BB).second) {
+//         if (opts::Verbosity >= 2) {
+//           outs() << "BOLT-INSTRUMENTER: skip BB " << BB->getName()
+//                  << " due to exclusive instruction in function "
+//                  << Function.getPrintName() << "\n";
+//         }
+//       }
+
+//       if (!IsLoad && BC.MIB->isAArch64ExclusiveStore(Inst)) {
+//         if (opts::Verbosity >= 2) {
+//           outs() << "BOLT-INSTRUMENTER: function " << Function.getPrintName()
+//                  << " has exclusive store without corresponding load. Ignoring "
+//                     "the function.\n";
+//         }
+//         return true;
+//       }
+
+//       if (IsLoad && (BC.MIB->isAArch64ExclusiveStore(Inst) ||
+//                      BC.MIB->isAArch64ExclusiveClear(Inst)))
+//         IsLoad = false;
+//     }
+
+//     if (IsLoad && BB->succ_size() == 0) {
+//       if (opts::Verbosity >= 2) {
+//         outs()
+//             << "BOLT-INSTRUMENTER: function " << Function.getPrintName()
+//             << " has exclusive load in trailing BB. Ignoring the function.\n";
+//       }
+//       return true;
+//     }
+
+//     for (BinaryBasicBlock *BBS : BB->successors())
+//       BBQueue.push({BBS, IsLoad});
+//   }
+
+//   while (!BBQueue.empty()) {
+//     BinaryBasicBlock *BB = BBQueue.front().first;
+//     bool IsLoad = BBQueue.front().second;
+//     BBQueue.pop();
+//     if (!Visited.insert(BB).second)
+//         continue;
+
+//     for (const MCInst &Inst : *BB) {
+//         // 检测连续的LR指令
+//         if (BC.MIB->isRISCVLoadReserved(Inst) && IsLoad) {
+//             if (opts::Verbosity >= 2) {
+//                 outs() << "BOLT-INSTRUMENTER: function " << Function.getPrintName()
+//                        << " has consecutive LR instructions. Ignoring the function.\n";
+//             }
+//             return true;
+//         }
+
+//         // 更新LR状态
+//         if (BC.MIB->isRISCVLoadReserved(Inst))
+//             IsLoad = true;
+
+//         // 标记需要跳过的BB
+//         if (IsLoad && BBToSkip.insert(BB).second) {
+//             if (opts::Verbosity >= 2) {
+//                 outs() << "BOLT-INSTRUMENTER: skip BB " << BB->getName()
+//                        << " due to atomic sequence in function "
+//                        << Function.getPrintName() << "\n";
+//             }
+//         }
+
+//         // 检测孤立的SC指令
+//         if (!IsLoad && BC.MIB->isRISCVStoreConditional(Inst)) {
+//             if (opts::Verbosity >= 2) {
+//                 outs() << "BOLT-INSTRUMENTER: function " << Function.getPrintName()
+//                        << " has SC without preceding LR. Ignoring the function.\n";
+//             }
+//             return true;
+//         }
+
+//         // SC指令会清除保留状态
+//         if (IsLoad && BC.MIB->isRISCVStoreConditional(Inst))
+//             IsLoad = false;
+//     }
+
+//     // 检测末尾未配对的LR
+//     if (IsLoad && BB->succ_size() == 0) {
+//         if (opts::Verbosity >= 2) {
+//             outs() << "BOLT-INSTRUMENTER: function " << Function.getPrintName()
+//                    << " has dangling LR in terminal BB. Ignoring the function.\n";
+//         }
+//         return true;
+//     }
+
+//     // 传播状态到后继基本块
+//     for (BinaryBasicBlock *BBS : BB->successors())
+//         BBQueue.push({BBS, IsLoad});
+//   }
+
+//   if (BBToSkip.size() == Visited.size()) {
+//     if (opts::Verbosity >= 2) {
+//       outs() << "BOLT-INSTRUMENTER: all BBs are marked with true. Ignoring the "
+//                 "function "
+//              << Function.getPrintName() << "\n";
+//     }
+//     return true;
+//   }
+
+//   return false;
+// }
 
 uint32_t Instrumentation::getFunctionNameIndex(const BinaryFunction &Function) {
   auto Iter = FuncToStringIdx.find(&Function);
