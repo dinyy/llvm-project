@@ -10,7 +10,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "RISCVMCSymbolizer.h"
 #include "MCTargetDesc/RISCVMCExpr.h"
 #include "MCTargetDesc/RISCVMCTargetDesc.h"
 #include "bolt/Core/MCPlusBuilder.h"
@@ -36,11 +35,11 @@ public:
   using MCPlusBuilder::createLoad;
   using MCPlusBuilder::MCPlusBuilder;
 
-  std::unique_ptr<MCSymbolizer>
-  createTargetSymbolizer(BinaryFunction &Function,
-                         bool CreateNewSymbols) const override {
-    return std::make_unique<RISCVMCSymbolizer>(Function, CreateNewSymbols);
-  }
+  // std::unique_ptr<MCSymbolizer>
+  // createTargetSymbolizer(BinaryFunction &Function,
+  //                        bool CreateNewSymbols) const override {
+  //   return std::make_unique<RISCVMCSymbolizer>(Function, CreateNewSymbols);
+  // }
 
   /// Extract annotation value from immediate operand value.
   static int64_t extractAnnotationValue(int64_t ImmValue) {
@@ -514,37 +513,37 @@ void loadReg(MCInst &Inst, unsigned DestReg, unsigned AddrReg) const {
     return createCall(RISCV::PseudoTAIL, Inst, Target, Ctx);
   }
 
-bool mayStore(const MCInst &Inst) const override{
-    return isStoreReg(Inst) || 
-           isAtomicStore(Inst);
-}
-bool isStoreToStack(const MCInst &Inst) const {
-  // 1. 先检查是否为存储指令
-  if (!mayStore(Inst))
-    return false;
+// bool mayStore(const MCInst &Inst) const override{
+//     return isStoreReg(Inst) || 
+//            isAtomicStore(Inst);
+// }
+// bool isStoreToStack(const MCInst &Inst) const {
+//   // 1. 先检查是否为存储指令
+//   if (!mayStore(Inst))
+//     return false;
 
-  // 2. 处理压缩存储指令的特殊情况（如 C.SWSP）
-  switch (Inst.getOpcode()) {
-  case RISCV::C_SWSP:  // RV32C 压缩存储指令
-  case RISCV::C_SDSP:  // RV64C 压缩存储指令
-    return true;       // 这些指令隐式使用 sp 作为基址
-  default:
-    break;
-  }
+//   // 2. 处理压缩存储指令的特殊情况（如 C.SWSP）
+//   switch (Inst.getOpcode()) {
+//   case RISCV::C_SWSP:  // RV32C 压缩存储指令
+//   case RISCV::C_SDSP:  // RV64C 压缩存储指令
+//     return true;       // 这些指令隐式使用 sp 作为基址
+//   default:
+//     break;
+//   }
 
-  // 3. 遍历源操作数检查基址寄存器
-  for (const MCOperand &Operand : useOperands(Inst)) {
-    if (!Operand.isReg())
-      continue;
+//   // 3. 遍历源操作数检查基址寄存器
+//   for (const MCOperand &Operand : useOperands(Inst)) {
+//     if (!Operand.isReg())
+//       continue;
 
-    // 4. 检查寄存器是否为栈指针（x2 或别名 sp）
-    const unsigned Reg = Operand.getReg();
-    if (Reg == RISCV::X2)
-      return true;
-  }
+//     // 4. 检查寄存器是否为栈指针（x2 或别名 sp）
+//     const unsigned Reg = Operand.getReg();
+//     if (Reg == RISCV::X2)
+//       return true;
+//   }
 
-  return false;
-}
+//   return false;
+// }
 
 bool mayLoad(const MCInst &Inst) const {
   return isLoadByte(Inst)  ||   // 对应LDRB
@@ -677,7 +676,7 @@ void createIndirectBranch(MCInst &Inst, MCPhysReg MemBaseReg,
   int64_t Disp) const {
   Inst.setOpcode(RISCV::JALR);
   Inst.clear();
-  Inst.addOperand(RISCV::X0);
+  Inst.addOperand(MCOperand::createReg(RISCV::X0));
   Inst.addOperand(MCOperand::createReg(MemBaseReg));
   Inst.addOperand(MCOperand::createImm(Disp));
 }
@@ -821,7 +820,7 @@ InstructionListType createInstrumentedIndirectCall(MCInst &&CallInst,
   Insts.insert(Insts.end(), LoadImm.begin(), LoadImm.end());
   spillRegs(Insts, {RISCV::X10, RISCV::X11});
   Insts.resize(Insts.size() + 2);
-  InstructionListType Addr = materializeAddress(HandlerFuncAddr, RISCV::X10);
+  InstructionListType Addr = materializeAddress(HandlerFuncAddr, Ctx, RISCV::X10);
   assert(Addr.size() == 2 && "Invalid Addr size");
   std::copy(Addr.begin(), Addr.end(), Insts.end() - Addr.size());
   Insts.emplace_back();
@@ -856,7 +855,7 @@ InstructionListType createInstrumentedIndirectCall(MCInst &&CallInst,
     // nzcv这个没有保存下来，我认为RISCV上面不用保存NZCV类似功能的寄存器
 
     Insts.resize(Insts.size() + 2);
-    InstructionListType Addr = materializeAddress(InstrTrampoline, RISCV::X10);
+    InstructionListType Addr = materializeAddress(InstrTrampoline, Ctx, RISCV::X10);
     assert(Addr.size() == 2 && "Invalid Addr size");
     std::copy(Addr.begin(), Addr.end(), Insts.end() - Addr.size());
     Insts.emplace_back();
@@ -889,7 +888,7 @@ InstructionListType createInstrumentedIndirectCall(MCInst &&CallInst,
     reloadRegs(Insts, {RISCV::X28, RISCV::X28});
     reloadRegs(Insts, {RISCV::X10, RISCV::X11});
     Insts.emplace_back();
-    createIndirectBranch(Insts.back(), RISCV::X28);         // jalr x0, x16, 0
+    createIndirectBranch(Insts.back(), RISCV::X28,0);         // jalr x0, x16, 0
     return Insts;
 }
 
@@ -905,7 +904,7 @@ InstructionListType createInstrumentedIndirectCall(MCInst &&CallInst,
     std::copy(Addr.begin(), Addr.end(), Insts.begin());
     assert(Addr.size() == 2 && "Invalid Addr size");
     Insts.emplace_back();
-    createLD(Insts.back(), RISCV::X10, RISCV::X10, 0)
+    createLD(Insts.back(), RISCV::X10, RISCV::X10, 0);
     Insts.emplace_back();
     createReturn(Insts.back());
     return Insts;
@@ -1147,101 +1146,78 @@ InstructionListType createInstrumentedIndirectCall(MCInst &&CallInst,
     }
   }
 
-  bool evaluateRISCVMemoryOperand(const MCInst &Inst, int64_t &DispImm,
-    const MCExpr **DispExpr = nullptr) const {
-      // 处理 AUIPC 指令的特殊情况
-      if (isAUIPC(Inst)) {
-      const MCOperand &Operand = Inst.getOperand(0);
-      if (Operand.isImm()) {
-      DispImm = Operand.getImm();
-      return true;
-      } else if (Operand.isExpr()) {
-      if (DispExpr) {
-      *DispExpr = Operand.getExpr();
-      return true;
-      }
-      }
-      return false;
-      }
+//   bool evaluateRISCVMemoryOperand(const MCInst &Inst, int64_t &DispImm,
+//     const MCExpr **DispExpr = nullptr) const {
+//       // 处理 AUIPC 指令的特殊情况
+//       if (isAUIPC(Inst)) {
+//       const MCOperand &Operand = Inst.getOperand(0);
+//       if (Operand.isImm()) {
+//       DispImm = Operand.getImm();
+//       return true;
+//       } else if (Operand.isExpr()) {
+//       if (DispExpr) {
+//       *DispExpr = Operand.getExpr();
+//       return true;
+//       }
+//       }
+//       return false;
+//       }
 
-      // 处理 PC 相对寻址和常规内存操作数
-      const MCInstrDesc &MCII = Info->get(Inst.getOpcode());
-      for (unsigned I = 0, E = MCII.getNumOperands(); I != E; ++I) {
-      const MCOperandInfo &OpInfo = MCII.operands()[I];
+//       // 处理 PC 相对寻址和常规内存操作数
+//       const MCInstrDesc &MCII = Info->get(Inst.getOpcode());
+//       for (unsigned I = 0, E = MCII.getNumOperands(); I != E; ++I) {
+//       const MCOperandInfo &OpInfo = MCII.operands()[I];
 
-      // 识别 RISC-V 的 PC 相对操作数类型
-      if (OpInfo.OperandType == RISCV::OPERAND_PCREL_HI ||
-      OpInfo.OperandType == RISCV::OPERAND_PCREL_LO) {
-      const MCOperand &Operand = Inst.getOperand(I);
+//       // 识别 RISC-V 的 PC 相对操作数类型
+//       if (OpInfo.OperandType == RISCV::OPERAND_PCREL_HI ||
+//       OpInfo.OperandType == RISCV::OPERAND_PCREL_LO) {
+//       const MCOperand &Operand = Inst.getOperand(I);
 
-      if (Operand.isImm()) {
-      DispImm = Operand.getImm();
-      // RISC-V 的 HI20 立即数需要左移 12 位
-      if (OpInfo.OperandType == RISCV::OPERAND_PCREL_HI)
-      DispImm <<= 12;
-      return true;
-      } else if (Operand.isExpr()) {
-      if (DispExpr) {
-      *DispExpr = Operand.getExpr();
-      return true;
-      }
-      }
-      return false;
-}
-
-// 处理常规内存偏移（如 lw/sw 的 offset）
-if (OpInfo.OperandType == RISCV::OPERAND_SIMM12 ||
-OpInfo.OperandType == RISCV::OPERAND_UIMM12) {
-const MCOperand &Operand = Inst.getOperand(I);
-
-if (Operand.isImm()) {
-DispImm = Operand.getImm();
-// RISC-V 的偏移是符号扩展的 12-bit 值
-DispImm = SignExtend64<12>(DispImm);
-return true;
-} else if (Operand.isExpr()) {
-if (DispExpr) {
-*DispExpr = Operand.getExpr();
-return true;
-}
-}
-return false;
-}
-}
-return false;
-}
+//       if (Operand.isImm()) {
+//       DispImm = Operand.getImm();
+//       // RISC-V 的 HI20 立即数需要左移 12 位
+//       if (OpInfo.OperandType == RISCV::OPERAND_PCREL_HI)
+//       DispImm <<= 12;
+//       return true;
+//       } else if (Operand.isExpr()) {
+//       if (DispExpr) {
+//       *DispExpr = Operand.getExpr();
+//       return true;
+//       }
+//       }
+//       return false;
+// }
 
   bool evaluateMemOperandTarget(const MCInst &Inst, uint64_t &Target,
     uint64_t Address,
     uint64_t Size) const override {
-    int64_t DispValue;
-    const MCExpr *DispExpr = nullptr;
+    // int64_t DispValue;
+    // const MCExpr *DispExpr = nullptr;
 
-    // RISC-V 内存操作数评估函数（需自定义实现）
-    if (!evaluateRISCVMemoryOperand(Inst, DispValue, &DispExpr))
+    // // RISC-V 内存操作数评估函数（需自定义实现）
+    // if (!evaluateRISCVMemoryOperand(Inst, DispValue, &DispExpr))
+    // return false;
+
+    // // 拒绝需要动态计算的表达式
+    // if (DispExpr)
+    // return false;
+
+    // Target = DispValue;
+
+    // // 处理 PC 相对寻址的特殊指令
+    // switch (Inst.getOpcode()) {
+    // case RISCV::AUIPC:  // 处理高位地址构造
+    // // AUIPC 的计算方式: Target = (DispValue << 12) + (Address & ~0xFFF)
+    // Target = (DispValue << 12) + (Address & ~0xFFFULL);
+    // break;
+
+    // case RISCV::JALR:   // 处理间接跳转（可能需要特殊处理）
+    // default:
+    // // 常规指令：PC 相对地址 = Address + 位移
+    // Target += Address;
+    // break;
+    // }
     return false;
-
-    // 拒绝需要动态计算的表达式
-    if (DispExpr)
-    return false;
-
-    Target = DispValue;
-
-    // 处理 PC 相对寻址的特殊指令
-    switch (Inst.getOpcode()) {
-    case RISCV::AUIPC:  // 处理高位地址构造
-    // AUIPC 的计算方式: Target = (DispValue << 12) + (Address & ~0xFFF)
-    Target = (DispValue << 12) + (Address & ~0xFFFULL);
-    break;
-
-    case RISCV::JALR:   // 处理间接跳转（可能需要特殊处理）
-    default:
-    // 常规指令：PC 相对地址 = Address + 位移
-    Target += Address;
-    break;
-    }
-
-return true;
 }
 
   bool isCallAuipc(const MCInst &Inst) const {
