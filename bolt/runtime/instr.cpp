@@ -1677,8 +1677,8 @@ extern "C" __attribute((naked)) void __bolt_instr_indirect_call()
 #elif defined(__riscv)
   // clang-format off
   __asm__ __volatile__(SAVE_ALL
-                      "ld x0, 88(x2)\n"
-                      "ld x1, 96(x2)\n"
+                      "ld x10, 88(x2)\n"
+                      "ld x11, 96(x2)\n"
                       "jal instrumentIndirectCall\n"
                       RESTORE_ALL
                       "ret\n"
