@@ -494,6 +494,7 @@ void loadReg(MCInst &Inst, unsigned DestReg, unsigned AddrReg) const {
     return StringRef("\0\0\0\0", 4);
   }
 
+
   void createCall(unsigned Opcode, MCInst &Inst, const MCSymbol *Target,
                   MCContext *Ctx) {
     Inst.setOpcode(Opcode);
@@ -898,45 +899,33 @@ InstructionListType createInstrumentedIndirectCall(MCInst &&CallInst,
   }
   
   InstructionListType createGetter(MCContext *Ctx, const char *name) const {
-    InstructionListType Insts(4);
+    InstructionListType Insts;
     MCSymbol *Locs = Ctx->getOrCreateSymbol(name);
-    
-    // 使用临时寄存器 t0 (x5) 替代 AArch64 的 X0
-    const unsigned AddrReg = RISCV::X5;  // t0 寄存器
-    
-    // 生成符号地址到寄存器（RISC-V 需要两条指令）
-    InstructionListType Addr = materializeAddress(Locs, Ctx, AddrReg);
+    InstructionListType Addr = materializeAddress(Locs, Ctx, RISCV::X10);
     std::copy(Addr.begin(), Addr.end(), Insts.begin());
     assert(Addr.size() == 2 && "Invalid Addr size");
-  
-    // 从地址寄存器加载数据到返回值寄存器 a0 (x10)
-    loadReg(Insts[2], RISCV::X10, AddrReg); // a0 = *t0
-  
-    // 生成返回指令（使用 JALR x0, x1, 0）
-    createReturn(Insts[3]);
-    
+    Insts.emplace_back();
+    createLD(Insts.back(), RISCV::X10, RISCV::X10, 0)
+    Insts.emplace_back();
+    createReturn(Insts.back());
     return Insts;
   }
 
   InstructionListType createNumCountersGetter(MCContext *Ctx) const override {
-    // return createGetter(Ctx, "__bolt_num_counters");
-    return {};
+    return createGetter(Ctx, "__bolt_num_counters");
   }
 
   InstructionListType
   createInstrLocationsGetter(MCContext *Ctx) const override {
-    // return createGetter(Ctx, "__bolt_instr_locations");
-    return {};
+    return createGetter(Ctx, "__bolt_instr_locations");
   }
 
   InstructionListType createInstrTablesGetter(MCContext *Ctx) const override {
-    // return createGetter(Ctx, "__bolt_instr_tables");
-    return {};
+    return createGetter(Ctx, "__bolt_instr_tables");
   }
 
   InstructionListType createInstrNumFuncsGetter(MCContext *Ctx) const override {
-    // return createGetter(Ctx, "__bolt_instr_num_funcs");
-    return {};
+    return createGetter(Ctx, "__bolt_instr_num_funcs");
   }
 
   InstructionListType materializeAddress(const MCSymbol *Target, MCContext *Ctx,
@@ -1012,12 +1001,12 @@ InstructionListType createInstrumentedIndirectCall(MCInst &&CallInst,
 
   void createStore(MCInst &Inst, unsigned Reg, unsigned BaseReg,
     int64_t Offset) const {
-  Inst = MCInstBuilder(RISCV::SD).addReg(Reg).addReg(BaseReg).addImm(Offset);
+    Inst = MCInstBuilder(RISCV::SD).addReg(Reg).addReg(BaseReg).addImm(Offset);
   }
 
   void createLoad(MCInst &Inst, unsigned Reg, unsigned BaseReg,
     int64_t Offset) const {
-  Inst = MCInstBuilder(RISCV::LD).addReg(Reg).addReg(BaseReg).addImm(Offset);
+    Inst = MCInstBuilder(RISCV::LD).addReg(Reg).addReg(BaseReg).addImm(Offset);
   }
 
   void spillRegs(InstructionListType &Insts,const SmallVector<unsigned> &Regs) const {
@@ -1040,40 +1029,6 @@ InstructionListType createInstrumentedIndirectCall(MCInst &&CallInst,
     createSPInc(Insts.emplace_back(), Regs.size() * 8);
   }
 
-  static void loadReg(MCInst &Inst, MCPhysReg To, MCPhysReg From) {
-    Inst.setOpcode(AArch64::LDRXui);
-    Inst.clear();
-    if (From == AArch64::SP) {
-      Inst.setOpcode(AArch64::LDRXpost);
-      Inst.addOperand(MCOperand::createReg(From));
-      Inst.addOperand(MCOperand::createReg(To));
-      Inst.addOperand(MCOperand::createReg(From));
-      Inst.addOperand(MCOperand::createImm(16));
-    } else {
-      Inst.addOperand(MCOperand::createReg(To));
-      Inst.addOperand(MCOperand::createReg(From));
-      Inst.addOperand(MCOperand::createImm(0));
-    }
-  }
-  static void storeReg(MCInst &Inst, MCPhysReg From, MCPhysReg To) {
-    // RISC-V 使用 SD 指令存储双字（64位）
-    Inst.setOpcode(RISCV::SD);
-    Inst.clear();
-  
-    if (To == RISCV::X2) { // X2 是 RISC-V 的栈指针 (SP)
-      // 处理栈指针预减情况：先调整栈指针再存储
-      // 注意：RISC-V 需要手动调整指针，此处生成 SD 到调整后的位置
-      Inst.addOperand(MCOperand::createReg(From));     // 源寄存器
-      Inst.addOperand(MCOperand::createReg(RISCV::X2)); // 基址寄存器 (SP)
-      Inst.addOperand(MCOperand::createImm(-16));       // 偏移量
-      // 注意：调用者需额外生成 ADDI SP, SP, -16 指令调整指针
-    } else {
-      // 普通寄存器存储
-      Inst.addOperand(MCOperand::createReg(From)); // 源寄存器
-      Inst.addOperand(MCOperand::createReg(To));   // 基址寄存器
-      Inst.addOperand(MCOperand::createImm(0));    // 零偏移
-    }
-  }
 
   const MCSymbol *getTargetSymbol(const MCExpr *Expr) const override {
     auto *RISCVExpr = dyn_cast<RISCVMCExpr>(Expr);
