@@ -385,7 +385,7 @@ public:
 
   void createIndirectCallInst(MCInst &Inst, bool IsTailCall, MCPhysReg Reg) const {
     Inst.clear();
-    Inst = MCInstBuilder(IsTailCall ? RISCV::JALR) 
+    Inst = MCInstBuilder(RISCV::JALR) 
           .addReg(IsTailCall ? RISCV::X0 : RISCV::X1)
           .addReg(Reg)
           .addImm(0); 
@@ -438,23 +438,23 @@ public:
     // ld t1, 8(sp)
     // addi sp, sp, 16
     InstructionListType Insts;
-    spillRegs(Insts, {RISCV::X5, RISCV::X6});
+    spillRegs(Insts, {RISCV::X10, RISCV::X11});
 
-    createLA(Insts, RISCV::X5, Target, *Ctx);
+    createLA(Insts, RISCV::X10, Target, Ctx);
 
     MCInst LI = MCInstBuilder(RISCV::ADDI)
-    .addReg(RISCV::X6)
+    .addReg(RISCV::X11)
     .addReg(RISCV::X0)
     .addImm(1);
     Insts.push_back(LI);
 
     MCInst AMOADD = MCInstBuilder(RISCV::AMOADD_D)
             .addReg(RISCV::X0)
-            .addReg(RISCV::X5)
-            .addReg(RISCV::X6);
+            .addReg(RISCV::X10)
+            .addReg(RISCV::X11);
     Insts.push_back(AMOADD);
 
-    reloadRegs(Insts, {RISCV::X5, RISCV::X6});
+    reloadRegs(Insts, {RISCV::X10, RISCV::X11});
     return Insts;
   }
 
@@ -531,7 +531,7 @@ public:
 
     reloadRegs(Insts, {RISCV::X10, RISCV::X11});
     
-    createAddImm(Insts[2], RISCV::X2, RISCV::X2, 16);   
+    createRegInc(Insts[2], RISCV::X2, 16);   
     reloadRegs(Insts, {RISCV::X28});
     reloadRegs(Insts, {RISCV::X10, RISCV::X11});
     Insts.emplace_back();
@@ -603,38 +603,9 @@ public:
     return Insts;
   }
 
-  const RISCVMCExpr *createSymbolRefExpr(const MCSymbol *Target,
-    RISCVMCExpr::VariantKind VK,
-    MCContext &Ctx) const {
-    return RISCVMCExpr::create(MCSymbolRefExpr::create(Target, Ctx), VK, Ctx);
-  }
-
-  void createAuipcInstPair(InstructionListType &Insts, unsigned DestReg,
-    const MCSymbol *Target, unsigned SecondOpcode,
-    MCContext &Ctx) const {
-    MCInst AUIPC = MCInstBuilder(RISCV::AUIPC)
-      .addReg(DestReg)
-      .addExpr(createSymbolRefExpr(
-          Target, RISCVMCExpr::VK_RISCV_PCREL_HI, Ctx));
-    MCSymbol *AUIPCLabel = Ctx.createNamedTempSymbol("pcrel_hi");
-    // AUIPC.setSymbol(AUIPCLabel);
-    // BC.MIB->setInstLabel(AUIPC,AUIPCLabel);
-    customSetAnnotationOpValue(AUIPC, MCPlus::MCAnnotation::kLabel,
-                    reinterpret_cast<int64_t>(AUIPCLabel));
-    Insts.push_back(AUIPC);
-
-    MCInst SecondInst =
-    MCInstBuilder(SecondOpcode)
-    .addReg(DestReg)
-    .addReg(DestReg)
-    .addExpr(createSymbolRefExpr(AUIPCLabel,
-                        RISCVMCExpr::VK_RISCV_PCREL_LO, Ctx));
-    Insts.push_back(SecondInst);
-  }
-
   void createLA(InstructionListType &Insts, unsigned DestReg,
-    const MCSymbol *Target, MCContext &Ctx) const {
-      createAuipcInstPair(Insts, DestReg, Target, RISCV::ADDI, Ctx);
+    const MCSymbol *Target, MCContext *Ctx) const {
+      Insts = materializeAddress(Target, Ctx, DestReg);
   }
 
   void createRegInc(MCInst &Inst, unsigned Reg, int64_t Imm) const {

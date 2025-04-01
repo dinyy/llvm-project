@@ -1751,7 +1751,9 @@ extern "C" __attribute((naked)) void __bolt_instr_start()
   __asm__ __volatile__(SAVE_ALL
                        "jal x1,__bolt_instr_setup\n"
                        RESTORE_ALL
-                       "tail __bolt_start_trampoline\n"
+                       "auipc x28, %pcrel_hi(__bolt_start_trampoline)\n" 
+                       "addi x28, x28, %pcrel_lo(__bolt_start_trampoline)\n" 
+                       "jalr x28\n" 
                        :::);
   // clang-format on
 #else
@@ -1780,9 +1782,9 @@ extern "C" void __bolt_instr_fini() {
   // clang-format on
 #elif defined(__riscv)
   __asm__ __volatile__(SAVE_ALL
-                       "auipc x5, %pcrel_hi(__bolt_fini_trampoline)\n" 
-                       "addi x5, x5, %pcrel_lo(__bolt_fini_trampoline)\n" 
-                       "jalr x5\n" 
+                       "auipc x28, %pcrel_hi(__bolt_fini_trampoline)\n" 
+                       "addi x28, x28, %pcrel_lo(__bolt_fini_trampoline)\n" 
+                       "jalr x28\n" 
                        RESTORE_ALL
                        :::);
 
