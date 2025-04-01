@@ -345,10 +345,10 @@ bool isLoadDouble(const MCInst &Inst) const{
 // ///    ADDI  x6, x6, imm_lo
 // ///    JALR  x0, x6, 0
 // ///
-// uint64_t matchLinkerVeneer(InstructionIterator Begin, InstructionIterator End,
-//     uint64_t Address, const MCInst &CurInst,
-//     MCInst *&TargetHiBits, MCInst *&TargetLowBits,
-//     uint64_t &Target) const override {
+uint64_t matchLinkerVeneer(InstructionIterator Begin, InstructionIterator End,
+    uint64_t Address, const MCInst &CurInst,
+    MCInst *&TargetHiBits, MCInst *&TargetLowBits,
+    uint64_t &Target) const override {
 //   // 检查当前指令是否为 JALR x0, x6, 0
 //   if (CurInst.getOpcode() != RISCV::JALR || 
 //   !CurInst.getOperand(0).isReg() ||
@@ -399,7 +399,8 @@ bool isLoadDouble(const MCInst &Inst) const{
 //   Target = (Address + (ImmHi << 12)) + ImmLo;
 
 //   return 3;  // 匹配 3 条指令
-// }
+      return 0;
+}
 
   IndirectBranchType analyzeIndirectBranch(
       MCInst &Instruction, InstructionIterator Begin, InstructionIterator End,
@@ -718,7 +719,7 @@ InstructionListType createCmpJE(MCPhysReg RegNo, int64_t Imm,
 
 void createIndirectCallInst(MCInst &Inst, bool IsTailCall, MCPhysReg Reg) const {
   Inst.clear();
-  Inst = MCInstBuilder(IsTailCall ? RISCV::JALR : RISCV::JALR) 
+  Inst = MCInstBuilder(IsTailCall ? RISCV::JALR) 
         .addReg(IsTailCall ? RISCV::X0 : RISCV::X1)
         .addReg(Reg)
         .addImm(0); 
@@ -747,15 +748,10 @@ void convertIndirectCallToLoad(MCInst &Inst, MCPhysReg Reg) override {
   if (IsTailCall)
     removeAnnotation(Inst, MCPlus::MCAnnotation::kTailCall);
 
-  if (Inst.getOpcode() == RISCV::JALR || Inst.getOpcode() == RISCV::C_JALR|| Inst.getOpcode() == RISCV::C_JR) {
-    if (Inst.getNumOperands() < 3)
-      return;
-    MCPhysReg SrcReg = Inst.getOperand(1).getReg();
-    Inst.clear();     
-    Inst = MCInstBuilder(RISCV::ADDI) 
-          .addReg(Reg)
-          .addReg(SrcReg)
-          .addImm(0); 
+  if (Inst.getOpcode() == RISCV::JALR || Inst.getOpcode() == RISCV::C_JR || Inst.getOpcode() == RISCV::C_JALR) {
+    Inst.setOpcode(RISCV::ADD);
+    Inst.insert(Inst.begin(), MCOperand::createReg(Reg));
+    Inst.insert(Inst.begin() + 1, MCOperand::createReg(RISCV::X0));
     return;
   }
   llvm_unreachable("Unsupported indirect call opcode");
@@ -900,9 +896,10 @@ InstructionListType createInstrumentedIndirectCall(MCInst &&CallInst,
   InstructionListType createGetter(MCContext *Ctx, const char *name) const {
     InstructionListType Insts;
     MCSymbol *Locs = Ctx->getOrCreateSymbol(name);
+    Insts.resize(Insts.size() + 2);
     InstructionListType Addr = materializeAddress(Locs, Ctx, RISCV::X10);
-    std::copy(Addr.begin(), Addr.end(), Insts.begin());
     assert(Addr.size() == 2 && "Invalid Addr size");
+    std::copy(Addr.begin(), Addr.end(), Insts.end() - Addr.size());
     Insts.emplace_back();
     createLD(Insts.back(), RISCV::X10, RISCV::X10, 0);
     Insts.emplace_back();
