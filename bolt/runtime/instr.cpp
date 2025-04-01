@@ -1674,6 +1674,16 @@ extern "C" __attribute((naked)) void __bolt_instr_indirect_call()
                        "ret\n"
                        :::);
   // clang-format on
+#elif defined(__riscv)
+  // clang-format off
+  __asm__ __volatile__(SAVE_ALL
+                      "ld x10, 88(x2)\n"
+                      "ld x11, 96(x2)\n"
+                      "jal instrumentIndirectCall\n"
+                      RESTORE_ALL
+                      "ret\n"
+                      :::);
+  // clang-format on
 #else
   // clang-format off
   __asm__ __volatile__(SAVE_ALL
@@ -1697,6 +1707,16 @@ extern "C" __attribute((naked)) void __bolt_instr_indirect_tailcall()
                        RESTORE_ALL
                        "ret\n"
                        :::);
+  // clang-format on
+#elif defined(__riscv)
+  // clang-format off
+  __asm__ __volatile__(SAVE_ALL
+                        "ld x10, 88(x2)\n"
+                        "ld x11, 96(x2)\n"
+                        "jal instrumentIndirectCall\n"
+                        RESTORE_ALL
+                        "ret\n"
+                        :::);
   // clang-format on
 #else
   // clang-format off
@@ -1724,12 +1744,24 @@ extern "C" __attribute((naked)) void __bolt_instr_start()
                        "br x16\n"
                        :::);
   // clang-format on
+#elif defined(__riscv)
+  // clang-format off
+  // Only a0 (fini address) needs to be saved. Simply store it temporarily in a
+  // callee-saved register.
+  __asm__ __volatile__(SAVE_ALL
+                       "jal x1,__bolt_instr_setup\n"
+                       RESTORE_ALL
+                       "tail __bolt_start_trampoline\n"
+                       :::);
+  // clang-format on
 #else
   // clang-format off
   __asm__ __volatile__(SAVE_ALL
                        "call __bolt_instr_setup\n"
                        RESTORE_ALL
-                       "jmp __bolt_start_trampoline\n"
+                       "auipc x5, %pcrel_hi(__bolt_fini_trampoline)\n" 
+                       "addi x5, x5, %pcrel_lo(__bolt_fini_trampoline)\n" 
+                       "jalr x1,x5\n"
                        :::);
   // clang-format on
 #endif
@@ -1746,6 +1778,15 @@ extern "C" void __bolt_instr_fini() {
                        RESTORE_ALL
                        :::);
   // clang-format on
+#elif defined(__riscv)
+  __asm__ __volatile__(SAVE_ALL
+                       "auipc x5, %pcrel_hi(__bolt_fini_trampoline)\n" 
+                       "addi x5, x5, %pcrel_lo(__bolt_fini_trampoline)\n" 
+                       "jalr x5\n" 
+                       RESTORE_ALL
+                       :::);
+
+  __bolt_fini_trampoline();
 #else
   __asm__ __volatile__("call __bolt_fini_trampoline\n" :::);
 #endif
