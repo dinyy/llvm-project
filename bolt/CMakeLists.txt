@@ -90,7 +90,6 @@ if ((CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64"
   set(BOLT_ENABLE_RUNTIME_default ON)
 endif()
 option(BOLT_ENABLE_RUNTIME "Enable BOLT runtime" ${BOLT_ENABLE_RUNTIME_default})
-set(BOLT_ENABLE_RUNTIME TRUE)
 if (BOLT_ENABLE_RUNTIME)
   # Some systems prevent reading /proc/self/map_files
   execute_process(COMMAND ls /proc/self/map_files
@@ -138,7 +137,7 @@ if (LLVM_INCLUDE_TESTS)
 endif()
 
 if (BOLT_ENABLE_RUNTIME)
-  message(STATUS "Building BOLT runtime libraries for X86")
+  message(STATUS "Building BOLT runtime libraries for ${CMAKE_SYSTEM_PROCESSOR}")
   set(extra_args "")
   if(CMAKE_SYSROOT)
     list(APPEND extra_args -DCMAKE_SYSROOT=${CMAKE_SYSROOT})
