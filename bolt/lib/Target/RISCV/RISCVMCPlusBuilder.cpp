@@ -549,16 +549,6 @@ public:
     createStackPointerDecrement(Insts.back(), Regs.size() * 8);
   }
 
-  void createStore(MCInst &Inst, unsigned Reg, unsigned BaseReg,
-    int64_t Offset) const {
-    Inst = MCInstBuilder(RISCV::SD).addReg(Reg).addReg(BaseReg).addImm(Offset);
-  }
-
-  void createLoad(MCInst &Inst, unsigned Reg, unsigned BaseReg,
-    int64_t Offset) const {
-    Inst = MCInstBuilder(RISCV::LD).addReg(Reg).addReg(BaseReg).addImm(Offset);
-  }
-
   void atomicAdd(MCInst &Inst, MCPhysReg RegAtomic, MCPhysReg RegTo,
                  MCPhysReg RegCnt) const {
     Inst = MCInstBuilder(RISCV::AMOADD_D)
@@ -641,7 +631,6 @@ public:
                           ELF::R_RISCV_PCREL_LO12_I);
     return Insts;
   }
-
 
   InstructionListType
   createInstrIncMemory(const MCSymbol *Target, MCContext *Ctx, bool IsLeaf,
@@ -807,7 +796,7 @@ public:
     // get IMM higher 32bit
     Insts.emplace_back(
         MCInstBuilder(RISCV::LUI).addReg(Dest).addImm((Imm >> 44) & 0xFFFFF));
-    Insts.emplace_back(MCInstBuilder(RISCV::LUI)  
+    Insts.emplace_back(MCInstBuilder(RISCV::LUI)
                            .addReg(RISCV::X5)
                            .addImm((Imm >> 32) & 0xFFF));
     Insts.emplace_back(MCInstBuilder(RISCV::SRLI)
